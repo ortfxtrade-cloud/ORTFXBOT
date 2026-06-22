@@ -6,13 +6,12 @@ from flask import Flask
 import telebot
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
 
 # --- 1. CONFIGURATION ---
-TOKEN = '8686769653:AAHyRTeszG4ss1XotEhQ41hu01dH3vsn9Go'  
+TOKEN = '8086769653:AAHyRTeszG4ss1XotEhQ41huO1dt3vsn9Go'
 CHAT_ID = '8701685996'
-PAIRS = ["EURUSD", "GBPUSD", "USDJPY", "GBPJPY", "EURJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD", "EURGBP"]
-TOUCH_THRESHOLD = 0.000003  
+PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X", "EURJPY=X", "USDCAD=X", "USDCHF=X", "AUDUSD=X", "NZDUSD=X", "EURGBP=X"]
+TOUCH_THRESHOLD = 0.000003
 
 bot = telebot.TeleBot(TOKEN)
 last_alerts = {}
@@ -45,7 +44,7 @@ def send_telegram(msg):
 
 def get_data(pair, interval):
     try:
-        df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
+        df = yf.download(f"{pair}", period="2d", interval=interval, progress=False)
         if df.empty: return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
@@ -53,99 +52,112 @@ def get_data(pair, interval):
     except Exception:
         return None
 
-def analyze_ticker(pair):
-    df_m5 = get_data(pair, "5m")
-    df_m1 = get_data(pair, "1m")
+def calculate_macd(df):
+    # Native EMA and MACD calculation without pandas_ta
+    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
+    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = exp1 - exp2
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    return macd, signal, hist
 
-    if df_m5 is None or df_m1 is None or len(df_m5) < 40:
-        return
+def calculate_rsi(df, periods=14):
+    close_delta = df['Close'].diff()
+    up = close_delta.clip(lower=0)
+    down = -1 * close_delta.clip(upper=0)
+    ma_up = up.ewm(com=periods - 1, adjust=False).mean()
+    ma_down = down.ewm(com=periods - 1, adjust=False).mean()
+    rsi = ma_up / ma_down
+    return 100 - (100 / (1 + rsi))
 
-    macd_m5 = df_m5.ta.macd(fast=12, slow=26, signal=9)
-    macd_m1 = df_m1.ta.macd(fast=12, slow=26, signal=9)
-    rsi = df_m5.ta.rsi(length=14).iloc[-1]
-    price = df_m5['Close'].iloc[-1]
-
-    curr_m, prev_m = macd_m5['MACD_12_26_9'].iloc[-1], macd_m5['MACD_12_26_9'].iloc[-2]
-    curr_s, prev_s = macd_m5['MACDs_12_26_9'].iloc[-1], macd_m5['MACDs_12_26_9'].iloc[-2]
-
-    gap = abs(curr_m - curr_s)
-    m1_m, m1_s = macd_m1['MACD_12_26_9'].iloc[-1], macd_m1['MACDs_12_26_9'].iloc[-1]
-
-    alert_key = f"{pair}_alert"
-
-    if time.time() - last_alerts.get(alert_key, 0) < 300:
-        return
-
-    # --- BUY LOGIC ---
-    if 30 <= rsi <= 45:
-        if gap < TOUCH_THRESHOLD and curr_m < curr_s:
-            send_telegram(f"🔍 [GET READY😁] {pair}\nLines are effectively touching. Price: {price:.5f}")
-            last_alerts[alert_key] = time.time()
-        elif prev_m < prev_s and curr_m > curr_s and m1_m > m1_s:
-            send_telegram(f"🔥⬆️✅ [BUY] {pair}\nBullish cross confirmed! Price: {price:.5f}")
-            last_alerts[alert_key] = time.time()
-
-    # --- SELL LOGIC ---
-    elif 55 <= rsi <= 70:
-        if gap < TOUCH_THRESHOLD and curr_m > curr_s:
-            send_telegram(f"📉 [GET READY😁] {pair}\nLines are effectively touching. Price: {price:.5f}")
-            last_alerts[alert_key] = time.time()
-        elif prev_m > prev_s and curr_m < curr_s and m1_m < m1_s:
-            send_telegram(f"📉⬇️✅ [SELL] {pair}\nBearish cross confirmed! Price: {price:.5f}")
-            last_alerts[alert_key] = time.time()
-
-# Asynchronous background loop to allow simultaneous processing of commands
-async def continuous_market_scanner():
-    print("Market Engine Loop initialized...")
-    while state.is_running:
-        for pair in PAIRS:
-            if not state.is_running:  
-                break
-            try:
-                analyze_ticker(pair)
-            except Exception as e:
-                print(f"Error analyzing {pair}: {e}")
-            await asyncio.sleep(2)  
+def check_market_conditions():
+    alerts = []
+    for pair in PAIRS:
+        df_5m = get_data(pair, "5m")
+        df_1h = get_data(pair, "1h")
         
-        for _ in range(30):
-            if not state.is_running:
-                break
-            await asyncio.sleep(1)
+        if df_5m is None or df_1h is None or len(df_5m) < 30 or len(df_1h) < 30:
+            continue
+            
+        # 1-Hour Trend Direction
+        macd_h, signal_h, _ = calculate_macd(df_1h)
+        rsi_h = calculate_rsi(df_1h)
+        
+        last_macd_h = macd_h.iloc[-1].item()
+        last_sig_h = signal_h.iloc[-1].item()
+        last_rsi_h = rsi_h.iloc[-1].item()
+        
+        higher_tf_trend = "UP" if (last_macd_h > last_sig_h and last_rsi_h > 50) else "DOWN" if (last_macd_h < last_sig_h and last_rsi_h < 50) else "NEUTRAL"
+        
+        # 5-Minute Entry Execution
+        macd_m, signal_m, _ = calculate_macd(df_5m)
+        rsi_m = calculate_rsi(df_5m)
+        
+        prev_macd_m = macd_m.iloc[-2].item()
+        prev_sig_m = signal_m.iloc[-2].item()
+        curr_macd_m = macd_m.iloc[-1].item()
+        curr_sig_m = signal_m.iloc[-1].item()
+        curr_rsi_m = rsi_m.iloc[-1].item()
+        
+        clean_name = pair.replace("=X", "")
+        current_time = time.time()
+        
+        if higher_tf_trend == "UP" and prev_macd_m <= prev_sig_m and curr_macd_m > curr_sig_m and curr_rsi_m < 70:
+            if current_time - last_alerts.get(f"{clean_name}_CALL", 0) > 1800:
+                alerts.append(f"🟢 CORE ALGORITHM: CALL SETUP\nAsset: {clean_name}\nTimeframe: 5M Entry (1H Alignment)\nExecution: Market Order")
+                last_alerts[f"{clean_name}_CALL"] = current_time
+                
+        elif higher_tf_trend == "DOWN" and prev_macd_m >= prev_sig_m and curr_macd_m < curr_sig_m and curr_rsi_m > 30:
+            if current_time - last_alerts.get(f"{clean_name}_PUT", 0) > 1800:
+                alerts.append(f"🔴 CORE ALGORITHM: PUT SETUP\nAsset: {clean_name}\nTimeframe: 5M Entry (1H Alignment)\nExecution: Market Order")
+                last_alerts[f"{clean_name}_PUT"] = current_time
+                
+    return alerts
 
-# --- 5. TELEGRAM COMMAND HANDLERS ---
+async def analytical_monitor_loop():
+    print("[SYSTEM] Core processing routine initialized.")
+    while state.is_running:
+        try:
+            signals = check_market_conditions()
+            for signal in signals:
+                send_telegram(signal)
+        except Exception as e:
+            print(f"Execution Error: {e}")
+        await asyncio.sleep(60)
+
+def start_async_loop(loop):
+    asyncio.set_event_loop(loop)
+    loop.run_until_complete(analytical_monitor_loop())
+
+# --- 5. TELEGRAM INTERFACE ---
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if state.is_running:
-        bot.reply_to(message, "⚠️ System Core is already scanning market streams.")
+        bot.reply_to(message, "System Architecture Status: Active. Monitoring live data matrices.")
         return
-    
+        
     state.is_running = True
-    bot.reply_to(message, "🚀 Signal Engine Started. Market scans active.")
+    send_telegram("🚀 SYSTEM ARCHITECTURE ONLINE\nInitialization: Successful\nMode: Native Mathematical Calculation\nStatus: Scanning Market Feeds...")
     
-    loop = asyncio.get_event_loop()
-    state.monitor_task = loop.create_task(continuous_market_scanner())
+    loop = asyncio.new_event_loop()
+    t = Thread(target=start_async_loop, args=(loop,), daemon=True)
+    t.start()
 
 @bot.message_handler(commands=['stop'])
 def handle_stop(message):
     if not state.is_running:
-        bot.reply_to(message, "⚠️ System Core is already completely idle.")
+        bot.reply_to(message, "System Architecture Status: Terminated/Idle.")
         return
-
-    bot.reply_to(message, "🛑 Disengaging analysis loops safely...")
+        
     state.is_running = False
-    
-    if state.monitor_task:
-        state.monitor_task.cancel()
-        state.monitor_task = None
+    bot.reply_to(message, "System parsing routines suspended. Monitoring offline.")
 
-# --- 6. EXECUTION PIPELINE ---
-def main():
-    server_thread = Thread(target=run_http_server)
-    server_thread.daemon = True
-    server_thread.start()
-
-    print("Bot framework up. Polling listeners active...")
-    bot.infinity_polling()
-
-if __name__ == "__main__":
-    main()
+if __name__ == '__main__':
+    Thread(target=run_http_server, daemon=True).start()
+    print("[SYSTEM] HTTP webserver verification layer active.")
+    while True:
+        try:
+            bot.polling(none_stop=True, timeout=60)
+        except Exception as e:
+            print(f"Network error encountered: {e}")
+            time.sleep(15)
