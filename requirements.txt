@@ -1,0 +1,5 @@
+flask
+pyTelegramBotAPI
+yfinance
+pandas
+pandas-ta
