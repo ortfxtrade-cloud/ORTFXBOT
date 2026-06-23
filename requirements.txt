@@ -1,6 +1,6 @@
 Flask==3.0.3
 pyTelegramBotAPI==4.20.0
 yfinance==0.2.40
-pandas==1.5.3
+pandas==2.2.2
 pandas-ta==0.3.14b0
 requests==2.32.3
