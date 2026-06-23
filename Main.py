@@ -6,12 +6,19 @@ from flask import Flask
 import telebot
 import yfinance as yf
 import pandas as pd
+import pandas_ta as ta
 
 # --- 1. CONFIGURATION ---
-import os
 TOKEN = '8686769653:AAGuWQxuAknw_zZXP6b9_NQIvINzgoxLcPM'
 CHAT_ID = '8701685996'
-PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X", "EURJPY=X", "USDCAD=X", "USDCHF=X", "AUDUSD=X", "NZDUSD=X", "EURGBP=X"]
+
+# Complete IQ Option Comprehensive Asset List
+PAIRS = [
+    "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
+    "EURGBP", "EURJPY", "GBPJPY", "EURCHF", "EURCAD", "EURAUD", "EURNZD",
+    "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD", "AUDJPY", "CADJPY", "CHFJPY",
+    "NZDJPY", "AUDCAD", "AUDCHF", "AUDNZD", "CADCHF", "USDZAR", "USDTRY"
+]
 TOUCH_THRESHOLD = 0.000003
 
 bot = telebot.TeleBot(TOKEN)
@@ -45,86 +52,82 @@ def send_telegram(msg):
 
 def get_data(pair, interval):
     try:
-        df = yf.download(f"{pair}", period="2d", interval=interval, progress=False)
-        if df.empty: return None
+        df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
+        if df.empty: 
+            return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
     except Exception:
         return None
 
-def calculate_macd(df):
-    # Native EMA and MACD calculation without pandas_ta
-    exp1 = df['Close'].ewm(span=12, adjust=False).mean()
-    exp2 = df['Close'].ewm(span=26, adjust=False).mean()
-    macd = exp1 - exp2
-    signal = macd.ewm(span=9, adjust=False).mean()
-    hist = macd - signal
-    return macd, signal, hist
-
-def calculate_rsi(df, periods=14):
-    close_delta = df['Close'].diff()
-    up = close_delta.clip(lower=0)
-    down = -1 * close_delta.clip(upper=0)
-    ma_up = up.ewm(com=periods - 1, adjust=False).mean()
-    ma_down = down.ewm(com=periods - 1, adjust=False).mean()
-    rsi = ma_up / ma_down
-    return 100 - (100 / (1 + rsi))
-
 def check_market_conditions():
     alerts = []
     for pair in PAIRS:
-        df_5m = get_data(pair, "5m")
-        df_1h = get_data(pair, "1h")
+        # Pacing delay between assets to prevent rate limits or container throttling
+        time.sleep(1.5)
         
-        if df_5m is None or df_1h is None or len(df_5m) < 30 or len(df_1h) < 30:
+        df_m5 = get_data(pair, "5m")
+        df_m1 = get_data(pair, "1m")
+        
+        if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
+            continue
+
+        # Calculate Indicators via pandas_ta
+        macd_m5 = df_m5.ta.macd(fast=12, slow=26, signal=9)
+        macd_m1 = df_m1.ta.macd(fast=12, slow=26, signal=9)
+        
+        if macd_m5 is None or macd_m1 is None:
             continue
             
-        # 1-Hour Trend Direction
-        macd_h, signal_h, _ = calculate_macd(df_1h)
-        rsi_h = calculate_rsi(df_1h)
+        rsi = df_m5.ta.rsi(length=14).iloc[-1]
+        price = df_m5['Close'].iloc[-1]
+
+        # Current/Prev MACD values for M5
+        curr_m, prev_m = macd_m5['MACD_12_26_9'].iloc[-1], macd_m5['MACD_12_26_9'].iloc[-2]
+        curr_s, prev_s = macd_m5['MACDs_12_26_9'].iloc[-1], macd_m5['MACDs_12_26_9'].iloc[-2]
         
-        last_macd_h = macd_h.iloc[-1].item()
-        last_sig_h = signal_h.iloc[-1].item()
-        last_rsi_h = rsi_h.iloc[-1].item()
+        gap = abs(curr_m - curr_s)
+        m1_m, m1_s = macd_m1['MACD_12_26_9'].iloc[-1], macd_m1['MACDs_12_26_9'].iloc[-1]
         
-        higher_tf_trend = "UP" if (last_macd_h > last_sig_h and last_rsi_h > 50) else "DOWN" if (last_macd_h < last_sig_h and last_rsi_h < 50) else "NEUTRAL"
-        
-        # 5-Minute Entry Execution
-        macd_m, signal_m, _ = calculate_macd(df_5m)
-        rsi_m = calculate_rsi(df_5m)
-        
-        prev_macd_m = macd_m.iloc[-2].item()
-        prev_sig_m = signal_m.iloc[-2].item()
-        curr_macd_m = macd_m.iloc[-1].item()
-        curr_sig_m = signal_m.iloc[-1].item()
-        curr_rsi_m = rsi_m.iloc[-1].item()
-        
-        clean_name = pair.replace("=X", "")
+        alert_key = f"{pair}_alert"
         current_time = time.time()
         
-        if higher_tf_trend == "UP" and prev_macd_m <= prev_sig_m and curr_macd_m > curr_sig_m and curr_rsi_m < 70:
-            if current_time - last_alerts.get(f"{clean_name}_CALL", 0) > 1800:
-                alerts.append(f"🟢 CORE ALGORITHM: CALL SETUP\nAsset: {clean_name}\nTimeframe: 5M Entry (1H Alignment)\nExecution: Market Order")
-                last_alerts[f"{clean_name}_CALL"] = current_time
-                
-        elif higher_tf_trend == "DOWN" and prev_macd_m >= prev_sig_m and curr_macd_m < curr_sig_m and curr_rsi_m > 30:
-            if current_time - last_alerts.get(f"{clean_name}_PUT", 0) > 1800:
-                alerts.append(f"🔴 CORE ALGORITHM: PUT SETUP\nAsset: {clean_name}\nTimeframe: 5M Entry (1H Alignment)\nExecution: Market Order")
-                last_alerts[f"{clean_name}_PUT"] = current_time
+        # Cooldown check (5 minutes)
+        if current_time - last_alerts.get(alert_key, 0) < 300:
+            continue
+
+        # --- BUY LOGIC ---
+        if 30 <= rsi <= 45:
+            if gap < TOUCH_THRESHOLD and curr_m < curr_s:
+                alerts.append(f"🔍 [TOUCH] {pair}\nLines are effectively touching. Price: {price:.5f}")
+                last_alerts[alert_key] = current_time
+            elif prev_m < prev_s and curr_m > curr_s and m1_m > m1_s:
+                alerts.append(f"🔥 [CROSS] {pair}\nBullish cross confirmed! Price: {price:.5f}")
+                last_alerts[alert_key] = current_time
+
+        # --- SELL LOGIC ---
+        elif 55 <= rsi <= 70:
+            if gap < TOUCH_THRESHOLD and curr_m > curr_s:
+                alerts.append(f"📉 [TOUCH] {pair}\nLines are effectively touching. Price: {price:.5f}")
+                last_alerts[alert_key] = current_time
+            elif prev_m > prev_s and curr_m < curr_s and m1_m < m1_s:
+                alerts.append(f"💣 [CROSS] {pair}\nBearish cross confirmed! Price: {price:.5f}")
+                last_alerts[alert_key] = current_time
                 
     return alerts
 
 async def analytical_monitor_loop():
-    print("[SYSTEM] Core processing routine initialized.")
+    print("[SYSTEM] Core logic processing loop running with full asset matrix.")
     while state.is_running:
         try:
             signals = check_market_conditions()
             for signal in signals:
                 send_telegram(signal)
         except Exception as e:
-            print(f"Execution Error: {e}")
-        await asyncio.sleep(60)
+            print(f"Execution Error inside scanner: {e}")
+        # Shorter sleep between sweep cycles since internal iteration takes longer
+        await asyncio.sleep(10)
 
 def start_async_loop(loop):
     asyncio.set_event_loop(loop)
@@ -134,11 +137,11 @@ def start_async_loop(loop):
 @bot.message_handler(commands=['start'])
 def handle_start(message):
     if state.is_running:
-        bot.reply_to(message, "System Architecture Status: Active. Monitoring live data matrices.")
+        bot.reply_to(message, "System Status: Active. Monitoring matrix arrays.")
         return
         
     state.is_running = True
-    send_telegram("🚀 SYSTEM ARCHITECTURE ONLINE\nInitialization: Successful\nMode: Native Mathematical Calculation\nStatus: Scanning Market Feeds...")
+    send_telegram("🚀 SYSTEM ARCHITECTURE ONLINE\nStrategy: Comprehensive M5 Touch/Cross Engine\nStatus: Scanning Feeds...")
     
     loop = asyncio.new_event_loop()
     t = Thread(target=start_async_loop, args=(loop,), daemon=True)
@@ -147,18 +150,19 @@ def handle_start(message):
 @bot.message_handler(commands=['stop'])
 def handle_stop(message):
     if not state.is_running:
-        bot.reply_to(message, "System Architecture Status: Terminated/Idle.")
+        bot.reply_to(message, "System Status: Already offline.")
         return
         
     state.is_running = False
-    bot.reply_to(message, "System parsing routines suspended. Monitoring offline.")
+    bot.reply_to(message, "Monitoring suspended.")
 
 if __name__ == '__main__':
     Thread(target=run_http_server, daemon=True).start()
-    print("[SYSTEM] HTTP webserver verification layer active.")
+    print("[SYSTEM] Keepalive HTTP layer bound.")
     while True:
         try:
             bot.polling(none_stop=True, timeout=60)
         except Exception as e:
-            print(f"Network error encountered: {e}")
+            print(f"Network polling exception: {e}")
             time.sleep(15)
+
