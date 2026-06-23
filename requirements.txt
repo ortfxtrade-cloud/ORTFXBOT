@@ -1,8 +1,9 @@
+
 pyTelegramBotAPI==4.26.0
 python-telegram-bot==21.3
 yfinance==0.2.54
 pandas
-pandas-ta==0.3.14b0
+pandas-ta==0.4.71b0
 flask==3.0.3
 gunicorn==22.0.0
 websockets==12.0
