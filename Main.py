@@ -1,36 +1,36 @@
+
 import os
-import json
 import time
-import asyncio
 import threading
-from collections import defaultdict
 from flask import Flask
-import websockets
 import telebot
+import requests
 import yfinance as yf
 import pandas as pd
 import pandas_ta as ta
-from telegram.ext import ApplicationBuilder, CommandHandler
 
 # --- WEB SERVER FOR RENDER HEALTH CHECKS ---
 app = Flask('')
-IS_RUNNING = True  # Strategy Loop Flag
+IS_RUNNING = True 
 
 @app.route('/')
 def home():
     status = "RUNNING" if IS_RUNNING else "STOPPED"
-    return f"System status: {status}. Monitoring market strategies and tracking tick velocity 24/5."
+    return f"System status: {status}. Monitoring market strategies 24/5."
 
-def run_web_server(): been
+def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = os.getenv('8686769653:AAGuWQxuAknw_zZXP6b9_NQIvINzgoxLcPM')
+TOKEN = os.getenv('8686769653:AAEOjDiPDARlrULGyLP9VrSYzBxgj15AtG4')
 CHAT_ID = os.getenv('8701685996')
-FINNHUB_API_KEY = os.getenv('D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0')
+FINNHUB_API_KEY = os.getenv(D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0')
 
-# Full 24 Pairs for Sequential Strategy Scanning (Yahoo Format)
+# Initialize Unified Telebot Engine
+sync_bot = telebot.TeleBot(TOKEN)
+
+# Full 24 Pairs for Strategy Scanning
 STRATEGY_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
     "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
@@ -40,45 +40,45 @@ STRATEGY_PAIRS = [
 TOUCH_THRESHOLD = 0.000003
 last_alerts = {}
 
-# Free Tier Fix: Slice the matrix to ONLY track the first 5 pairs for Velocity via WebSocket
-VELOCITY_PAIRS = [f"OANDA:{p[:3]}_{p[3:]}" for p in STRATEGY_PAIRS[:5]]
-SAFETY_THRESHOLD = 500
-market_history = defaultdict(lambda: defaultdict(int))
-
-# Initialize Sync Bot Core for background loop signals
-sync_bot = telebot.TeleBot(TOKEN)
-
-# --- FINNHUB WEBSOCKET DATA STREAM (ASYNC) ---
-async def websocket_listener():
+# --- ON-DEMAND VELOCITY CHECKER ---
+def get_pair_velocity_status(pair):
+    """
+    Fetches live market liquidity using Finnhub's Quote endpoint 
+    at the exact moment a strategy setup is triggered.
+    """
     if not FINNHUB_API_KEY:
-        print("Finnhub API Key missing! Velocity tracking disabled.")
-        return
+        return "UNKNOWN (API Key Missing)"
         
-    uri = f"wss://ws.finnhub.io?token={FINNHUB_API_KEY}"
-    while True:
-        try:
-            async with websockets.connect(uri) as ws:
-                for pair in VELOCITY_PAIRS:
-                    await ws.send(json.dumps({"type": "subscribe", "symbol": pair}))
-                print(f"Successfully subscribed to {len(VELOCITY_PAIRS)} streams for free tier velocity tracking.")
+    # Convert pair format from EURUSD to OANDA:EUR_USD for Finnhub
+    finnhub_symbol = f"OANDA:{pair[:3]}_{pair[3:]}"
+    url = f"https://finnhub.io/api/v1/quote?symbol={finnhub_symbol}&token={FINNHUB_API_KEY}"
+    
+    try:
+        response = requests.get(url, timeout=5)
+        if response.status_code == 200:
+            data = response.json()
+            # Finnhub updates open/high/low/current prices on new ticks.
+            # We check if active pricing data is present.
+            current_price = data.get('c', 0)
+            prev_close = data.get('pc', 0)
+            
+            if current_price == 0:
+                return "🚨 UNSAFE (No Liquid Vol)"
+                
+            # Calculate absolute price movement as a quick volatility metric
+            movement = abs(current_price - prev_close)
+            if movement > 0:
+                return "🟢 SAFE (Active Liquidity)"
+            else:
+                return "⚠️ LOW VELOCITY (Stale Session)"
+    except Exception:
+        pass
+    return "⚠️ UNCONFIRMED (API Timeout)"
 
-                while True:
-                    msg = await ws.recv()
-                    data = json.loads(msg)
-                    if data.get("type") == "trade":
-                        for trade in data['data']:
-                            symbol = trade['s']
-                            hour = int(time.strftime("%H"))
-                            if 6 <= hour <= 22:
-                                market_history[symbol][hour] += 1
-        except Exception as e:
-            print(f"WebSocket Error: {e}. Reconnecting in 5 seconds...")
-            await asyncio.sleep(5)
-
-# --- MACD & RSI STRATEGY ANALYSIS (SYNC FORK) ---
+# --- MACD & RSI STRATEGY ANALYSIS ---
 def send_telegram_signal(msg):
     try:
-        sync_bot.send_message(CHAT_ID, msg)
+        sync_bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
     except Exception as e:
         print(f"Signal Routing Error: {e}")
 
@@ -114,20 +114,25 @@ def analyze_ticker(pair):
     if time.time() - last_alerts.get(alert_key, 0) < 300:
         return
 
+    # If conditions match, perform targeted velocity audit immediately
     if 30 <= rsi <= 45:
         if gap < TOUCH_THRESHOLD and curr_m < curr_s:
-            send_telegram_signal(f"🔍 [GET READY😁] {pair}\nLines touching. Price: {price:.5f}")
+            velocity = get_pair_velocity_status(pair)
+            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
         elif prev_m < prev_s and curr_m > curr_s and m1_m > m1_s:
-            send_telegram_signal(f"🔥⬆️✅ [BUY] {pair}\nBullish cross! Price: {price:.5f}")
+            velocity = get_pair_velocity_status(pair)
+            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
     elif 55 <= rsi <= 70:
         if gap < TOUCH_THRESHOLD and curr_m > curr_s:
-            send_telegram_signal(f"📉 [GET READY😁] {pair}\nLines touching. Price: {price:.5f}")
+            velocity = get_pair_velocity_status(pair)
+            send_telegram_signal(f"📉 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
         elif prev_m > prev_s and curr_m < curr_s and m1_m < m1_s:
-            send_telegram_signal(f"📉⬇️✅ [SELL] {pair}\nBearish cross! Price: {price:.5f}")
+            velocity = get_pair_velocity_status(pair)
+            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
 def strategy_loop():
@@ -144,81 +149,46 @@ def strategy_loop():
                         analyze_ticker(pair)
                     except Exception as e:
                         print(f"Error checking {pair}: {e}")
-                    time.sleep(2)  # Defensive 2-second sleep per pair request
-                
-                # Free Tier Fix: Sleep for 5 minutes (300 seconds) to avoid Yahoo IP blocks
+                    time.sleep(2)
                 time.sleep(300)
             else:
                 time.sleep(5)
         else:
             time.sleep(3600)
 
-# --- TELEGRAM ASYNC CONTROL CHANNELS ---
-async def start_bot_cmd(update, context):
+# --- TELEGRAM ADMIN INTERFACE ---
+@sync_bot.message_handler(commands=['start_bot'])
+def start_bot_cmd(message):
     global IS_RUNNING
-    if str(update.effective_chat.id) != str(CHAT_ID): return
+    if str(message.chat.id) != str(CHAT_ID): return
     IS_RUNNING = True
-    await update.message.reply_text("🚀 Technical strategy matrix active. Scanning markets...")
+    sync_bot.reply_to(message, "🚀 Technical strategy matrix active. Scanning markets...")
 
-async def stop_bot_cmd(update, context):
+@sync_bot.message_handler(commands=['stop_bot'])
+def stop_bot_cmd(message):
     global IS_RUNNING
-    if str(update.effective_chat.id) != str(CHAT_ID): return
+    if str(message.chat.id) != str(CHAT_ID): return
     IS_RUNNING = False
-    await update.message.reply_text("🛑 Technical scans paused. Market stream remaining active.")
+    sync_bot.reply_to(message, "🛑 Technical scans paused.")
 
-async def status_cmd(update, context):
-    if str(update.effective_chat.id) != str(CHAT_ID): return
+@sync_bot.message_handler(commands=['status'])
+def status_cmd(message):
+    if str(message.chat.id) != str(CHAT_ID): return
     state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
-    await update.message.reply_text(f"Strategy Scan Status: {state}")
+    sync_bot.reply_to(message, f"Strategy Scan Status: {state}")
 
-async def velocity_cmd(update, context):
-    if str(update.effective_chat.id) != str(CHAT_ID): return
-    current_hour_int = int(time.strftime("%H"))
-    display_hour = max(6, min(current_hour_int, 22))
-
-    header = f"📈 FOREX VELOCITY (06:00 - {time.strftime('%H')}:00)\n```\n"
-    header += "PAIR       | Ticks | STATUS\n-----------|-------|-------\n"
-
-    rows = ""
-    for pair in VELOCITY_PAIRS:
-        hist = market_history.get(pair, {})
-        total_vol = sum(hist.get(h, 0) for h in range(6, display_hour + 1))
-        hours_elapsed = max(1, display_hour - 6 + 1)
-        status = "SAFE" if total_vol >= (SAFETY_THRESHOLD * hours_elapsed) else "UNSAFE"
-        
-        clean_name = pair.replace('OANDA:', '').replace('_', '')
-        rows += f"{clean_name.ljust(10)} | {str(total_vol).rjust(5)} | {status}\n"
-
-    await update.message.reply_text(header + rows + "```", parse_mode="Markdown")
-
-# --- ENVIRONMENT COUPLING ---
-async def main():
-    if not TOKEN:
-        print("TELEGRAM_TOKEN missing from environment variables!")
-        return
-
-    app_tg = ApplicationBuilder().token(TOKEN).build()
-    
-    app_tg.add_handler(CommandHandler("start_bot", start_bot_cmd))
-    app_tg.add_handler(CommandHandler("stop_bot", stop_bot_cmd))
-    app_tg.add_handler(CommandHandler("status", status_cmd))
-    app_tg.add_handler(CommandHandler("velocity", velocity_cmd))
-
-    await app_tg.initialize()
-    await app_tg.start()
-    await app_tg.updater.start_polling()
-
-    await websocket_listener()
-
+# --- INIT AND RUN ---
 if __name__ == "__main__":
-    t_strategy = threading.Thread(target=strategy_loop)
-    t_strategy.daemon = True
-    t_strategy.start()
-
+    # Start Web Server for Render
     t_web = threading.Thread(target=run_web_server)
     t_web.daemon = True
     t_web.start()
 
-    asyncio.run(main())
+    # Start Technical Scanning Engine
+    t_strategy = threading.Thread(target=strategy_loop)
+    t_strategy.daemon = True
+    t_strategy.start()
 
-
+    print("Background components online. Starting command sync listener...")
+    # Run Telegram interface on the main thread safely
+    sync_bot.infinity_polling()
