@@ -1,5 +1,5 @@
-pyTelegramBotAPI
-yfinance
-pandas
-pandas_ta
-flask
+pyTelegramBotAPI==4.12.0
+yfinance==0.2.40
+pandas==2.2.2
+flask==3.0.3
+https://github.com/twopirllc/pandas-ta/archive/refs/heads/development.zip
