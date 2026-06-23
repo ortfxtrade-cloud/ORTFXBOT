@@ -1,4 +1,3 @@
-
 import os
 import time
 import threading
@@ -7,7 +6,14 @@ import telebot
 import requests
 import yfinance as yf
 import pandas as pd
-import pandas_ta as ta
+
+# --- PATH TO PATCH PANDAS-TA FOR MODERN PANDAS VERSION CONTROLS ---
+# This prevents the AttributeError: 'DataFrame' object has no attribute 'append'
+def __dataframe_append_patch(self, other, **kwargs):
+    return pd.concat([self, other], **kwargs)
+pd.DataFrame.append = __dataframe_append_patch
+
+import pandas_ta as ta  # Imported safely after the patch injection
 
 # --- WEB SERVER FOR RENDER HEALTH CHECKS ---
 app = Flask('')
@@ -23,9 +29,9 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = os.getenv('8686769653:AAEOjDiPDARlrULGyLP9VrSYzBxgj15AtG4')
-CHAT_ID = os.getenv('8701685996')
-FINNHUB_API_KEY = os.getenv(D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0')
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
+FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
 
 # Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
@@ -42,14 +48,9 @@ last_alerts = {}
 
 # --- ON-DEMAND VELOCITY CHECKER ---
 def get_pair_velocity_status(pair):
-    """
-    Fetches live market liquidity using Finnhub's Quote endpoint 
-    at the exact moment a strategy setup is triggered.
-    """
     if not FINNHUB_API_KEY:
         return "UNKNOWN (API Key Missing)"
         
-    # Convert pair format from EURUSD to OANDA:EUR_USD for Finnhub
     finnhub_symbol = f"OANDA:{pair[:3]}_{pair[3:]}"
     url = f"https://finnhub.io/api/v1/quote?symbol={finnhub_symbol}&token={FINNHUB_API_KEY}"
     
@@ -57,15 +58,12 @@ def get_pair_velocity_status(pair):
         response = requests.get(url, timeout=5)
         if response.status_code == 200:
             data = response.json()
-            # Finnhub updates open/high/low/current prices on new ticks.
-            # We check if active pricing data is present.
             current_price = data.get('c', 0)
             prev_close = data.get('pc', 0)
             
             if current_price == 0:
                 return "🚨 UNSAFE (No Liquid Vol)"
                 
-            # Calculate absolute price movement as a quick volatility metric
             movement = abs(current_price - prev_close)
             if movement > 0:
                 return "🟢 SAFE (Active Liquidity)"
@@ -114,7 +112,6 @@ def analyze_ticker(pair):
     if time.time() - last_alerts.get(alert_key, 0) < 300:
         return
 
-    # If conditions match, perform targeted velocity audit immediately
     if 30 <= rsi <= 45:
         if gap < TOUCH_THRESHOLD and curr_m < curr_s:
             velocity = get_pair_velocity_status(pair)
@@ -179,16 +176,13 @@ def status_cmd(message):
 
 # --- INIT AND RUN ---
 if __name__ == "__main__":
-    # Start Web Server for Render
     t_web = threading.Thread(target=run_web_server)
     t_web.daemon = True
     t_web.start()
 
-    # Start Technical Scanning Engine
     t_strategy = threading.Thread(target=strategy_loop)
     t_strategy.daemon = True
     t_strategy.start()
 
     print("Background components online. Starting command sync listener...")
-    # Run Telegram interface on the main thread safely
     sync_bot.infinity_polling()
