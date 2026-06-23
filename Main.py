@@ -21,14 +21,14 @@ def home():
     status = "RUNNING" if IS_RUNNING else "STOPPED"
     return f"System status: {status}. Monitoring market strategies and tracking tick velocity 24/5."
 
-def run_web_server():
+def run_web_server(): been
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+TOKEN = os.getenv('8686769653:AAGuWQxuAknw_zZXP6b9_NQIvINzgoxLcPM')
+CHAT_ID = os.getenv('8701685996')
+FINNHUB_API_KEY = os.getenv('D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0')
 
 # Full 24 Pairs for Sequential Strategy Scanning (Yahoo Format)
 STRATEGY_PAIRS = [
