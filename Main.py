@@ -8,7 +8,8 @@ import yfinance as yf
 import pandas as pd
 
 # --- 1. CONFIGURATION ---
-TOKEN = '8686769653:AAG7HgP3q3DcHfFG_pZpQoxJrW9neUKetWc'
+import os
+TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
 CHAT_ID = '8701685996'
 PAIRS = ["EURUSD=X", "GBPUSD=X", "USDJPY=X", "GBPJPY=X", "EURJPY=X", "USDCAD=X", "USDCHF=X", "AUDUSD=X", "NZDUSD=X", "EURGBP=X"]
 TOUCH_THRESHOLD = 0.000003
