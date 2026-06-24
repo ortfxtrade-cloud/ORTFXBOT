@@ -7,14 +7,6 @@ import requests
 import yfinance as yf
 import pandas as pd
 
-# --- PATH TO PATCH PANDAS-TA FOR MODERN PANDAS VERSION CONTROLS ---
-# This prevents the AttributeError: 'DataFrame' object has no attribute 'append'
-def __dataframe_append_patch(self, other, **kwargs):
-    return pd.concat([self, other], **kwargs)
-pd.DataFrame.append = __dataframe_append_patch
-
-import pandas_ta as ta  # Imported safely after the patch injection
-
 # --- WEB SERVER FOR RENDER HEALTH CHECKS ---
 app = Flask('')
 IS_RUNNING = True 
@@ -73,6 +65,21 @@ def get_pair_velocity_status(pair):
         pass
     return "⚠️ UNCONFIRMED (API Timeout)"
 
+# --- NATIVE MATH TECHNICAL INDICATORS ---
+def calculate_rsi(series, period=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).ewm(com=period - 1, adjust=False).mean()
+    loss = (-delta.where(delta < 0, 0)).ewm(com=period - 1, adjust=False).mean()
+    rs = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
 # --- MACD & RSI STRATEGY ANALYSIS ---
 def send_telegram_signal(msg):
     try:
@@ -97,16 +104,19 @@ def analyze_ticker(pair):
     if df_m5 is None or df_m1 is None or len(df_m5) < 40:
         return
 
-    macd_m5 = df_m5.ta.macd(fast=12, slow=26, signal=9)
-    macd_m1 = df_m1.ta.macd(fast=12, slow=26, signal=9)
-    rsi = df_m5.ta.rsi(length=14).iloc[-1]
+    # Native calculation routines bypassing pandas-ta completely
+    macd_m5, signal_m5 = calculate_macd(df_m5['Close'])
+    macd_m1, signal_m1 = calculate_macd(df_m1['Close'])
+    rsi_series = calculate_rsi(df_m5['Close'])
+    
+    rsi = rsi_series.iloc[-1]
     price = df_m5['Close'].iloc[-1]
 
-    curr_m, prev_m = macd_m5['MACD_12_26_9'].iloc[-1], macd_m5['MACD_12_26_9'].iloc[-2]
-    curr_s, prev_s = macd_m5['MACDs_12_26_9'].iloc[-1], macd_m5['MACDs_12_26_9'].iloc[-2]
+    curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
+    curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
 
     gap = abs(curr_m - curr_s)
-    m1_m, m1_s = macd_m1['MACD_12_26_9'].iloc[-1], macd_m1['MACDs_12_26_9'].iloc[-1]
+    m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
 
     alert_key = f"{pair}_alert"
     if time.time() - last_alerts.get(alert_key, 0) < 300:
