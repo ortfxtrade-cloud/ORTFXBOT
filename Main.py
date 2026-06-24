@@ -23,7 +23,7 @@ def run_web_server():
 # --- CONFIGURATION FROM ENVIRONMENT ---
 TOKEN ='8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0'
 CHAT_ID =  '8701685996'
-FINNHUB_API_KEY = 'D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0'
+FINNHUB_API_KEY = 'd8tq131r01qhcnk5gh9gd8tq131r01qhcnk5gha0'
 
 # Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
