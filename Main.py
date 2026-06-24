@@ -90,7 +90,8 @@ def send_telegram_signal(msg):
 def get_yfinance_data(pair, interval):
     try:
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
-        if df.empty: return None
+        if df is None or df.empty: 
+            return None
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
         return df
@@ -101,13 +102,21 @@ def analyze_ticker(pair):
     df_m5 = get_yfinance_data(pair, "5m")
     df_m1 = get_yfinance_data(pair, "1m")
 
-    if df_m5 is None or df_m1 is None or len(df_m5) < 40:
+    # Defensively skip execution if either timeframe dataset is missing or incomplete
+    if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
         return
 
     # Native calculation routines bypassing pandas-ta completely
     macd_m5, signal_m5 = calculate_macd(df_m5['Close'])
     macd_m1, signal_m1 = calculate_macd(df_m1['Close'])
+    
+    # Verify indicator calculations yielded valid numerical records
+    if macd_m5 is None or signal_m5 is None or macd_m1 is None or signal_m1 is None:
+        return
+        
     rsi_series = calculate_rsi(df_m5['Close'])
+    if rsi_series.empty:
+        return
     
     rsi = rsi_series.iloc[-1]
     price = df_m5['Close'].iloc[-1]
