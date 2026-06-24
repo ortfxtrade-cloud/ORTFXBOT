@@ -23,7 +23,6 @@ def run_web_server():
 # --- CONFIGURATION FROM ENVIRONMENT ---
 TOKEN ='8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0'
 CHAT_ID =  '8701685996'
-FINNHUB_API_KEY = 'd8tq131r01qhcnk5gh9gd8tq131r01qhcnk5gha0'
 
 # Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
@@ -38,32 +37,24 @@ STRATEGY_PAIRS = [
 TOUCH_THRESHOLD = 0.000003
 last_alerts = {}
 
-# --- ON-DEMAND VELOCITY CHECKER ---
-def get_pair_velocity_status(pair):
-    if not FINNHUB_API_KEY:
-        return "UNKNOWN (API Key Missing)"
-        
-    finnhub_symbol = f"OANDA:{pair[:3]}_{pair[3:]}"
-    url = f"https://finnhub.io/api/v1/quote?symbol={finnhub_symbol}&token={FINNHUB_API_KEY}"
-    
+# --- NATIVE YFINANCE VELOCITY CHECKER (REPLACES FINNHUB) ---
+def calculate_yfinance_velocity(df_m1):
     try:
-        response = requests.get(url, timeout=5)
-        if response.status_code == 200:
-            data = response.json()
-            current_price = data.get('c', 0)
-            prev_close = data.get('pc', 0)
-            
-            if current_price == 0:
-                return "🚨 UNSAFE (No Liquid Vol)"
-                
-            movement = abs(current_price - prev_close)
-            if movement > 0:
-                return "🟢 SAFE (Active Liquidity)"
-            else:
-                return "⚠️ LOW VELOCITY (Stale Session)"
+        if df_m1 is None or len(df_m1) < 5:
+            return "⚠️ UNCONFIRMED (Data Missing)"
+        
+        # Look at the movement over the last 5 minutes on the M1 chart
+        recent_closes = df_m1['Close'].tail(5)
+        max_price = recent_closes.max()
+        min_price = recent_closes.min()
+        volatility = max_price - min_price
+        
+        if volatility > 0:
+            return "🟢 SAFE (Active Liquidity)"
+        else:
+            return "⚠️ LOW VELOCITY (Stale Session)"
     except Exception:
-        pass
-    return "⚠️ UNCONFIRMED (API Timeout)"
+        return "⚠️ UNCONFIRMED (Calculation Error)"
 
 # --- NATIVE MATH TECHNICAL INDICATORS ---
 def calculate_rsi(series, period=14):
@@ -102,15 +93,12 @@ def analyze_ticker(pair):
     df_m5 = get_yfinance_data(pair, "5m")
     df_m1 = get_yfinance_data(pair, "1m")
 
-    # Defensively skip execution if either timeframe dataset is missing or incomplete
     if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
         return
 
-    # Native calculation routines bypassing pandas-ta completely
     macd_m5, signal_m5 = calculate_macd(df_m5['Close'])
     macd_m1, signal_m1 = calculate_macd(df_m1['Close'])
     
-    # Verify indicator calculations yielded valid numerical records
     if macd_m5 is None or signal_m5 is None or macd_m1 is None or signal_m1 is None:
         return
         
@@ -133,21 +121,21 @@ def analyze_ticker(pair):
 
     if 30 <= rsi <= 45:
         if gap < TOUCH_THRESHOLD and curr_m < curr_s:
-            velocity = get_pair_velocity_status(pair)
+            velocity = calculate_yfinance_velocity(df_m1)
             send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
         elif prev_m < prev_s and curr_m > curr_s and m1_m > m1_s:
-            velocity = get_pair_velocity_status(pair)
+            velocity = calculate_yfinance_velocity(df_m1)
             send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
     elif 55 <= rsi <= 70:
         if gap < TOUCH_THRESHOLD and curr_m > curr_s:
-            velocity = get_pair_velocity_status(pair)
+            velocity = calculate_yfinance_velocity(df_m1)
             send_telegram_signal(f"📉 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
         elif prev_m > prev_s and curr_m < curr_s and m1_m < m1_s:
-            velocity = get_pair_velocity_status(pair)
+            velocity = calculate_yfinance_velocity(df_m1)
             send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
