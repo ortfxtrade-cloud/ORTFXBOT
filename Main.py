@@ -21,9 +21,9 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = os.getenv('TELEGRAM_TOKEN')
-CHAT_ID = os.getenv('TELEGRAM_CHAT_ID')
-FINNHUB_API_KEY = os.getenv('FINNHUB_API_KEY')
+TOKEN ='8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0'
+CHAT_ID =  '8701685996'
+FINNHUB_API_KEY = 'D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0'
 
 # Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
