@@ -186,6 +186,26 @@ def status_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
     state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
     sync_bot.reply_to(message, f"Strategy Scan Status: {state}")
+@sync_bot.message_handler(commands=['deploy'])
+def deploy_cmd(message):
+    # Security check: Only allow your personal Telegram ID to trigger a deployment
+    if str(message.chat.id) != str(CHAT_ID): 
+        return
+        
+    if not DEPLOY_HOOK:
+        sync_bot.reply_to(message, "❌ Deploy hook missing from environment setup.")
+        return
+        
+    sync_bot.reply_to(message, "🔄 Triggering remote build architecture on Render...")
+    try:
+        # This line sends the secret signal to Render to grab your latest GitHub code
+        response = requests.post(DEPLOY_HOOK, timeout=10)
+        if response.status_code in [200, 204, 201]:
+            sync_bot.send_message(CHAT_ID, "🚀 Deploy command accepted! Render is now compiling your latest code.")
+        else:
+            sync_bot.send_message(CHAT_ID, f"⚠️ Render server responded with status: {response.status_code}")
+    except Exception as e:
+        sync_bot.send_message(CHAT_ID, f"❌ Failed to reach Render endpoint: {e}")
 
 # --- INIT AND RUN ---
 if __name__ == "__main__":
