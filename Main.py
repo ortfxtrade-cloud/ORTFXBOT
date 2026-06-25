@@ -21,35 +21,31 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN ='8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0'
-CHAT_ID =  '8701685996'
-# --- CONFIGURATION FROM ENVIRONMENT ---
 TOKEN = "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0"
 CHAT_ID = "8701685996"
 FINNHUB_API_KEY = "D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0"
 DEPLOY_HOOK = "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
-# <-- ADD THIS LINE
 
 # Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
 
-# Full 24 Pairs for Strategy Scanning
+# Comprehensive Watchlist (Added your Exotic and Volatile Assets)
 STRATEGY_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
     "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
     "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD",
-    "AUDJPY", "NZDJPY", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD"
+    "AUDJPY", "NZDJPY", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD",
+    "USDZAR", "USDTRY", "USDINR", "USDMXN", "USDSGD", "USDHKD", "USDCNH"
 ]
-TOUCH_THRESHOLD = 0.000003
+
 last_alerts = {}
 
-# --- NATIVE YFINANCE VELOCITY CHECKER (REPLACES FINNHUB) ---
+# --- NATIVE YFINANCE VELOCITY CHECKER ---
 def calculate_yfinance_velocity(df_m1):
     try:
         if df_m1 is None or len(df_m1) < 5:
             return "⚠️ UNCONFIRMED (Data Missing)"
         
-        # Look at the movement over the last 5 minutes on the M1 chart
         recent_closes = df_m1['Close'].tail(5)
         max_price = recent_closes.max()
         min_price = recent_closes.min()
@@ -77,7 +73,6 @@ def calculate_macd(series, fast=12, slow=26, signal=9):
     signal_line = macd_line.ewm(span=signal, adjust=False).mean()
     return macd_line, signal_line
 
-# --- MACD & RSI STRATEGY ANALYSIS ---
 def send_telegram_signal(msg):
     try:
         sync_bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
@@ -95,6 +90,7 @@ def get_yfinance_data(pair, interval):
     except Exception:
         return None
 
+# --- MACD & RSI STRATEGY ANALYSIS (CORE DYNAMIC SYSTEM) ---
 def analyze_ticker(pair):
     df_m5 = get_yfinance_data(pair, "5m")
     df_m1 = get_yfinance_data(pair, "1m")
@@ -115,34 +111,69 @@ def analyze_ticker(pair):
     rsi = rsi_series.iloc[-1]
     price = df_m5['Close'].iloc[-1]
 
+    # M5 MACD values for setup detection
     curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
     curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
 
+    # Calculate absolute differences for current and previous bars
     gap = abs(curr_m - curr_s)
+    prev_gap = abs(prev_m - prev_s)
+    
+    # M1 MACD confirmation values
     m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
 
+    # Rate limiting guard
     alert_key = f"{pair}_alert"
     if time.time() - last_alerts.get(alert_key, 0) < 300:
         return
 
+    # --- DYNAMIC ASSET STRUCTURING MATRIX ---
+    is_jpy_pair = "JPY" in pair
+    is_exotic_pair = any(exotic in pair for exotic in ["ZAR", "TRY", "INR", "MXN", "SGD", "HKD", "CNH"])
+    is_standard_major = any(major in pair for major in ["USD", "EUR", "AUD", "GBP", "CAD", "CHF", "NZD"])
+
+    if is_jpy_pair or is_exotic_pair or price > 10:
+        DYNAMIC_THRESHOLD = 0.03
+        PRE_ALERT_ZONE = 0.08  
+    elif is_standard_major:
+        DYNAMIC_THRESHOLD = 0.0003
+        PRE_ALERT_ZONE = 0.0008  
+    else:
+        DYNAMIC_THRESHOLD = 0.0003
+        PRE_ALERT_ZONE = 0.0008
+
+    # --- SQUEEZE DETECTOR (FLATLINE COMPRESSION GUARD) ---
+    if gap < DYNAMIC_THRESHOLD:
+        return
+
+    # Crossover State Definition
+    has_crossed_bullish = prev_m < prev_s and curr_m > curr_s
+    has_crossed_bearish = prev_m > prev_s and curr_m < curr_s
+    is_shrinking = gap < prev_gap
+
+    # --- STRATEGY SIGNAL ROUTING ---
     if 30 <= rsi <= 45:
-        if gap < TOUCH_THRESHOLD and curr_m < curr_s:
+        # Pre-Alert Warning Stage
+        if is_shrinking and not has_crossed_bullish and gap <= PRE_ALERT_ZONE:
             velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
+            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential BUY.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
-        elif prev_m < prev_s and curr_m > curr_s and m1_m > m1_s:
+        # Execution Stage
+        elif has_crossed_bullish and m1_m > m1_s:
             velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
+            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
     elif 55 <= rsi <= 70:
-        if gap < TOUCH_THRESHOLD and curr_m > curr_s:
+        # Pre-Alert Warning Stage
+        if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
             velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"📉 *[GET READY]* {pair}\nLines touching.\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
+            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
-        elif prev_m > prev_s and curr_m < curr_s and m1_m < m1_s:
+        # Execution Stage
+        elif has_crossed_bearish and m1_m < m1_s:
             velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross!\nPrice: `{price:.5f}`\nVelocity: *{velocity}*")
+            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
             last_alerts[alert_key] = time.time()
 
 def strategy_loop():
@@ -186,19 +217,17 @@ def status_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
     state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
     sync_bot.reply_to(message, f"Strategy Scan Status: {state}")
+
 @sync_bot.message_handler(commands=['deploy'])
 def deploy_cmd(message):
-    # Security check: Only allow your personal Telegram ID to trigger a deployment
     if str(message.chat.id) != str(CHAT_ID): 
         return
-        
     if not DEPLOY_HOOK:
         sync_bot.reply_to(message, "❌ Deploy hook missing from environment setup.")
         return
         
     sync_bot.reply_to(message, "🔄 Triggering remote build architecture on Render...")
     try:
-        # This line sends the secret signal to Render to grab your latest GitHub code
         response = requests.post(DEPLOY_HOOK, timeout=10)
         if response.status_code in [200, 204, 201]:
             sync_bot.send_message(CHAT_ID, "🚀 Deploy command accepted! Render is now compiling your latest code.")
