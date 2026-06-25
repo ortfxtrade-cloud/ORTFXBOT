@@ -15,4 +15,4 @@ services:
       - key: FINNHUB_API_KEY
         value: "D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0" 
       - key: RENDER_DEPLOY_WEBHOOK
-        value: "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg"
+        value: "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
