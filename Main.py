@@ -1,193 +1,36 @@
 import os
 import time
 import threading
-from flask import Flask
-import telebot
 import requests
-import yfinance as yf
-import pandas as pd
+from flask import Flask
+from config import CHAT_ID, DEPLOY_HOOK, STRATEGY_PAIRS
+from state_db import init_db
+from alerts import sync_bot
+import engine
 
 # --- WEB SERVER FOR RENDER HEALTH CHECKS ---
 app = Flask('')
-IS_RUNNING = True 
 
 @app.route('/')
 def home():
-    status = "RUNNING" if IS_RUNNING else "STOPPED"
+    status = "RUNNING" if engine.IS_RUNNING else "STOPPED"
     return f"System status: {status}. Monitoring market strategies 24/5."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0"
-CHAT_ID = "8701685996"
-FINNHUB_API_KEY = "D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0"
-DEPLOY_HOOK = "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
-
-# Initialize Unified Telebot Engine
-sync_bot = telebot.TeleBot(TOKEN)
-
-# Comprehensive Watchlist (Added your Exotic and Volatile Assets)
-STRATEGY_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
-    "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
-    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD",
-    "AUDJPY", "NZDJPY", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD",
-    "USDZAR", "USDTRY", "USDINR", "USDMXN", "USDSGD", "USDHKD", "USDCNH"
-]
-
-last_alerts = {}
-
-# --- NATIVE YFINANCE VELOCITY CHECKER ---
-def calculate_yfinance_velocity(df_m1):
-    try:
-        if df_m1 is None or len(df_m1) < 5:
-            return "⚠️ UNCONFIRMED (Data Missing)"
-        
-        recent_closes = df_m1['Close'].tail(5)
-        max_price = recent_closes.max()
-        min_price = recent_closes.min()
-        volatility = max_price - min_price
-        
-        if volatility > 0:
-            return "🟢 SAFE (Active Liquidity)"
-        else:
-            return "⚠️ LOW VELOCITY (Stale Session)"
-    except Exception:
-        return "⚠️ UNCONFIRMED (Calculation Error)"
-
-# --- NATIVE MATH TECHNICAL INDICATORS ---
-def calculate_rsi(series, period=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).ewm(com=period - 1, adjust=False).mean()
-    loss = (-delta.where(delta < 0, 0)).ewm(com=period - 1, adjust=False).mean()
-    rs = gain / (loss + 1e-10)
-    return 100 - (100 / (1 + rs))
-
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line
-
-def send_telegram_signal(msg):
-    try:
-        sync_bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-    except Exception as e:
-        print(f"Signal Routing Error: {e}")
-
-def get_yfinance_data(pair, interval):
-    try:
-        df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
-        if df is None or df.empty: 
-            return None
-        if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
-    except Exception:
-        return None
-
-# --- MACD & RSI STRATEGY ANALYSIS (CORE DYNAMIC SYSTEM) ---
-def analyze_ticker(pair):
-    df_m5 = get_yfinance_data(pair, "5m")
-    df_m1 = get_yfinance_data(pair, "1m")
-
-    if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
-        return
-
-    macd_m5, signal_m5 = calculate_macd(df_m5['Close'])
-    macd_m1, signal_m1 = calculate_macd(df_m1['Close'])
-    
-    if macd_m5 is None or signal_m5 is None or macd_m1 is None or signal_m1 is None:
-        return
-        
-    rsi_series = calculate_rsi(df_m5['Close'])
-    if rsi_series.empty:
-        return
-    
-    rsi = rsi_series.iloc[-1]
-    price = df_m5['Close'].iloc[-1]
-
-    # M5 MACD values for setup detection
-    curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
-    curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
-
-    # Calculate absolute differences for current and previous bars
-    gap = abs(curr_m - curr_s)
-    prev_gap = abs(prev_m - prev_s)
-    
-    # M1 MACD confirmation values
-    m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
-
-    # Rate limiting guard
-    alert_key = f"{pair}_alert"
-    if time.time() - last_alerts.get(alert_key, 0) < 300:
-        return
-
-    # --- DYNAMIC ASSET STRUCTURING MATRIX ---
-    is_jpy_pair = "JPY" in pair
-    is_exotic_pair = any(exotic in pair for exotic in ["ZAR", "TRY", "INR", "MXN", "SGD", "HKD", "CNH"])
-    is_standard_major = any(major in pair for major in ["USD", "EUR", "AUD", "GBP", "CAD", "CHF", "NZD"])
-
-    if is_jpy_pair or is_exotic_pair or price > 10:
-        DYNAMIC_THRESHOLD = 0.03
-        PRE_ALERT_ZONE = 0.08  
-    elif is_standard_major:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008  
-    else:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008
-
-    # --- SQUEEZE DETECTOR (FLATLINE COMPRESSION GUARD) ---
-    if gap < DYNAMIC_THRESHOLD:
-        return
-
-    # Crossover State Definition
-    has_crossed_bullish = prev_m < prev_s and curr_m > curr_s
-    has_crossed_bearish = prev_m > prev_s and curr_m < curr_s
-    is_shrinking = gap < prev_gap
-
-    # --- STRATEGY SIGNAL ROUTING ---
-    if 30 <= rsi <= 45:
-        # Pre-Alert Warning Stage
-        if is_shrinking and not has_crossed_bullish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential BUY.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-        # Execution Stage
-        elif has_crossed_bullish and m1_m > m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-
-    elif 55 <= rsi <= 70:
-        # Pre-Alert Warning Stage
-        if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-        # Execution Stage
-        elif has_crossed_bearish and m1_m < m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-
 def strategy_loop():
-    global IS_RUNNING
     print("Strategy scanning mechanism initialized...")
     while True:
         current_day = time.gmtime().tm_wday
         if current_day < 5: 
-            if IS_RUNNING:
+            if engine.IS_RUNNING:
                 for pair in STRATEGY_PAIRS:
-                    if not IS_RUNNING: 
+                    if not engine.IS_RUNNING: 
                         break
                     try:
-                        analyze_ticker(pair)
+                        engine.analyze_ticker(pair)
                     except Exception as e:
                         print(f"Error checking {pair}: {e}")
                     time.sleep(2)
@@ -200,22 +43,20 @@ def strategy_loop():
 # --- TELEGRAM ADMIN INTERFACE ---
 @sync_bot.message_handler(commands=['start_bot'])
 def start_bot_cmd(message):
-    global IS_RUNNING
     if str(message.chat.id) != str(CHAT_ID): return
-    IS_RUNNING = True
+    engine.IS_RUNNING = True
     sync_bot.reply_to(message, "🚀 Technical strategy matrix active. Scanning markets...")
 
 @sync_bot.message_handler(commands=['stop_bot'])
 def stop_bot_cmd(message):
-    global IS_RUNNING
     if str(message.chat.id) != str(CHAT_ID): return
-    IS_RUNNING = False
+    engine.IS_RUNNING = False
     sync_bot.reply_to(message, "🛑 Technical scans paused.")
 
 @sync_bot.message_handler(commands=['status'])
 def status_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
-    state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
+    state = "🟢 ACTIVE" if engine.IS_RUNNING else "🔴 PAUSED"
     sync_bot.reply_to(message, f"Strategy Scan Status: {state}")
 
 @sync_bot.message_handler(commands=['deploy'])
@@ -238,6 +79,9 @@ def deploy_cmd(message):
 
 # --- INIT AND RUN ---
 if __name__ == "__main__":
+    print("Initializing state storage schema database layer...")
+    init_db()
+
     t_web = threading.Thread(target=run_web_server)
     t_web.daemon = True
     t_web.start()
