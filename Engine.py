@@ -14,10 +14,16 @@ def get_yfinance_data(pair, interval):
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
         if df is None or df.empty: 
             return None
+            
+        # Hardening Layer: Detect and completely flatten Multi-Index data column structures
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
+            
+        # Enforce strict data type and capitalization schema uniformity
+        df.columns = [str(col).strip().capitalize() for col in df.columns]
         return df
-    except Exception:
+    except Exception as e:
+        print(f"Data ingestion extraction failure for {pair}: {e}")
         return None
 
 def analyze_ticker(pair):
@@ -65,41 +71,4 @@ def analyze_ticker(pair):
         PRE_ALERT_ZONE = 0.08  
     elif is_standard_major:
         DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008  
-    else:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008
-
-    # --- SQUEEZE DETECTOR (FLATLINE COMPRESSION GUARD) ---
-    if gap < DYNAMIC_THRESHOLD:
-        return
-
-    # Crossover State Definition
-    has_crossed_bullish = prev_m < prev_s and curr_m > curr_s
-    has_crossed_bearish = prev_m > prev_s and curr_m < curr_s
-    is_shrinking = gap < prev_gap
-
-    # --- STRATEGY SIGNAL ROUTING ---
-    if 30 <= rsi <= 45:
-        # Pre-Alert Warning Stage
-        if is_shrinking and not has_crossed_bullish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential BUY.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            set_cooldown(pair)
-        # Execution Stage
-        elif has_crossed_bullish and m1_m > m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            set_cooldown(pair)
-
-    elif 55 <= rsi <= 70:
-        # Pre-Alert Warning Stage
-        if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            set_cooldown(pair)
-        # Execution Stage
-        elif has_crossed_bearish and m1_m < m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            set_cooldown(pair)
+        PRE_ALERT_ZONE = 0.0
