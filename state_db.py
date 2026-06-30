@@ -1,4 +1,4 @@
-hereimport sqlite3
+import sqlite3
 import time
 
 DB_FILE = "bot_state.db"
