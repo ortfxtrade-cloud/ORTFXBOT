@@ -1,11 +1,11 @@
-import sqlite3
+hereimport sqlite3
 import time
 
 DB_FILE = "bot_state.db"
 
 def init_db():
-    """Initializes the database schema if it does not exist on disk."""
-    with sqlite3.connect(DB_FILE) as conn:
+    """Initializes the database schema with a 5-second concurrency timeout pool."""
+    with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             CREATE TABLE IF NOT EXISTS alert_cooldowns (
@@ -16,9 +16,9 @@ def init_db():
         conn.commit()
 
 def set_cooldown(pair: str):
-    """Commits an epoch timestamp to local disk storage when a signal maps."""
+    """Commits an epoch timestamp to local disk storage, insulated against multi-threaded lockouts."""
     current_time = time.time()
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
         cursor = conn.cursor()
         cursor.execute("""
             INSERT INTO alert_cooldowns (pair, last_alert_time)
@@ -28,9 +28,9 @@ def set_cooldown(pair: str):
         conn.commit()
 
 def is_on_cooldown(pair: str, cooldown_duration: int) -> bool:
-    """Queries persistent ledger to find out if asset cooldown window remains active."""
+    """Queries persistent ledger securely, allowing parallel read requests without collision."""
     current_time = time.time()
-    with sqlite3.connect(DB_FILE) as conn:
+    with sqlite3.connect(DB_FILE, timeout=5.0) as conn:
         cursor = conn.cursor()
         cursor.execute("SELECT last_alert_time FROM alert_cooldowns WHERE pair = ?", (pair,))
         row = cursor.fetchone()
