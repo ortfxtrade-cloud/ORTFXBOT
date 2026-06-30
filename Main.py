@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor
 from config import CHAT_ID, DEPLOY_HOOK, STRATEGY_PAIRS
 from state_db import init_db
 from alerts import sync_bot
-import engine
+import Engine
 
 # --- WEB SERVER FOR RENDER HEALTH CHECKS ---
 app = Flask('')
