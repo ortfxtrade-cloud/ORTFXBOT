@@ -3,6 +3,7 @@ import time
 import threading
 import requests
 from flask import Flask
+from concurrent.futures import ThreadPoolExecutor
 from config import CHAT_ID, DEPLOY_HOOK, STRATEGY_PAIRS
 from state_db import init_db
 from alerts import sync_bot
@@ -14,31 +15,35 @@ app = Flask('')
 @app.route('/')
 def home():
     status = "RUNNING" if engine.IS_RUNNING else "STOPPED"
-    return f"System status: {status}. Monitoring market strategies 24/5."
+    return f"System status: {status}. Running Parallel Multi-Threaded Engine."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
+# --- CONCURRENT STRATEGY EXECUTION ENGINE ---
 def strategy_loop():
-    print("Strategy scanning mechanism initialized...")
+    print("Upgraded Concurrent Strategy Scanning Mechanism Initialized...")
     while True:
         current_day = time.gmtime().tm_wday
         if current_day < 5: 
             if engine.IS_RUNNING:
-                for pair in STRATEGY_PAIRS:
-                    if not engine.IS_RUNNING: 
-                        break
-                    try:
-                        engine.analyze_ticker(pair)
-                    except Exception as e:
-                        print(f"Error checking {pair}: {e}")
-                    time.sleep(2)
+                start_time = time.time()
+                print(f"🔄 Starting concurrent market sweep for {len(STRATEGY_PAIRS)} assets...")
+                
+                # Spin up a pool of 10 concurrent network workers to process pairs in parallel batches
+                with ThreadPoolExecutor(max_workers=10) as executor:
+                    executor.map(engine.analyze_ticker, STRATEGY_PAIRS)
+                
+                elapsed_time = time.time() - start_time
+                print(f"📥 Full market sweep completed concurrently in {elapsed_time:.2f} seconds.")
+                
+                # Sleep for 5 minutes before pulling fresh data blocks
                 time.sleep(300)
             else:
                 time.sleep(5)
         else:
-            time.sleep(3600)
+            time.sleep(3600)  # Weekend sleep cycle
 
 # --- TELEGRAM ADMIN INTERFACE ---
 @sync_bot.message_handler(commands=['start_bot'])
