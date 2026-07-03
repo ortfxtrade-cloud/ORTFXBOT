@@ -9,7 +9,7 @@ services:
       - key: PORT
         value: 8080
       - key: TELEGRAM_TOKEN
-        value: "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0"
+        value: "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08"
       - key: TELEGRAM_CHAT_ID
         value: "8701685996"
       - key: FINNHUB_API_KEY
