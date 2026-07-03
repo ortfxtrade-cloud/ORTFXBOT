@@ -16,6 +16,9 @@ app = Flask('')
 def home():
     status = "RUNNING" if engine.IS_RUNNING else "STOPPED"
     return f"System status: {status}. Running Parallel Multi-Threaded Engine."
+@app.route('/ping')
+def ping():
+    return "ok", 200
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
