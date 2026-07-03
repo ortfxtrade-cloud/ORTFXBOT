@@ -1,7 +1,7 @@
 import os
 
 # --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0"
+TOKEN = "8686769653:AAHakUURGdb1xu2qYWnmkhakX5yaNTB2b8I"
 CHAT_ID = "8701685996"
 FINNHUB_API_KEY = "D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0"
 DEPLOY_HOOK = "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
