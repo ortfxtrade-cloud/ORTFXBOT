@@ -1,98 +1,59 @@
+
 import telebot
 import threading
-from datetime import datetime
+from datetime import datetime, timedelta
 from config import TOKEN, CHAT_ID
 
-# Initialize Unified Telebot Engine
 sync_bot = telebot.TeleBot(TOKEN)
 
+def get_rounded_future_time():
+    """
+    Adds 5 minutes to the current server time and rounds down 
+    to the nearest 5-minute chart block (e.g., :00, :05, :10, :15).
+    """
+    now = datetime.now() + timedelta(minutes=5)
+    discard_minutes = now.minute % 5
+    rounded_time = now - timedelta(minutes=discard_minutes, seconds=now.second, microseconds=now.microsecond)
+    return rounded_time.strftime("%H:%M")
+
 def send_telegram_signal(msg):
-    """Core routing mechanism to dispatch formatted text signals."""
     try:
         sync_bot.send_message(CHAT_ID, msg, parse_mode="Markdown")
-        print("Telegram notification dispatched successfully.")
+        print("Telegram notification dispatched.")
     except Exception as e:
         print(f"Signal Routing Error: {e}")
 
 def send_touching_pre_alert(pair, price, direction_guess):
-    """Dispatches a warning alert when the MACD and Signal lines are touching."""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    target_emoji = "💥"
-    
-    msg = (
-        f"⚡ **5M LINES TOUCHING WATCHLIST ALERT** ⚡\n\n"
-        f"**Asset:** `{pair}`\n"
-        f"**Current Price:** `{price:.5f}`\n"
-        f"🔄 **Imminent Cross Bias:** {target_emoji} `{direction_guess}`\n\n"
-        f"📅 **Time Logged:** `{current_time}`\n"
-        f"⚠️ *Status:* MACD and Signal lines have collided and are touching. Crossover imminent."
-    )
+    time_str = get_rounded_future_time()
+    emoji = "⚡" if direction_guess == "BULLISH" else "🚨"
+    msg = f"{emoji} **TOUCHING:** `{pair}` @ `{price:.5f}` ({direction_guess}) | 🕒 Expiry Target: `{time_str}`"
     send_telegram_signal(msg)
 
 def send_buy_signal(pair, price, rsi, gap):
-    """Formats and dispatches a dedicated Bullish Strategy Buy Signal."""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    msg = (
-        f"🟢 **STRATEGY BUY SIGNAL** 🟢\n\n"
-        f"**Asset:** `{pair}`\n"
-        f"**Execution Price:** `{price:.5f}`\n"
-        f"🎯 **M5 RSI Trigger:** `{rsi:.2f}` (Target Zone: 30 - 45)\n"
-        f"**5m MACD Gap Residual:** `{gap:.6f}`\n\n"
-        f"📅 **Time Triggered:** `{current_time}`\n"
-        f"⏳ *Timeframe:* 5m Fresh Crossover Setup + 1m Trend Alignment Confirmation\n"
-        f"⚠️ *Status:* Cooldown period initiated."
-    )
+    time_str = get_rounded_future_time()
+    msg = f"🟢 **BUY LIMIT:** `{pair}` @ `{price:.5f}` | RSI: `{rsi:.1f}` | Gap: `{gap:.5f}` | 🕒 Target: `{time_str}`"
     send_telegram_signal(msg)
 
 def send_sell_signal(pair, price, rsi, gap):
-    """Formats and dispatches a dedicated Bearish Strategy Sell Signal."""
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    msg = (
-        f"🔴 **STRATEGY SELL SIGNAL** 🔴\n\n"
-        f"**Asset:** `{pair}`\n"
-        f"**Execution Price:** `{price:.5f}`\n"
-        f"🎯 **M5 RSI Trigger:** `{rsi:.2f}` (Target Zone: 55 - 70)\n"
-        f"**5m MACD Gap Residual:** `{gap:.6f}`\n\n"
-        f"📅 **Time Triggered:** `{current_time}`\n"
-        f"⏳ *Timeframe:* 5m Fresh Crossover Setup + 1m Trend Alignment Confirmation\n"
-        f"⚠️ *Status:* Cooldown period initiated."
-    )
+    time_str = get_rounded_future_time()
+    msg = f"🔴 **SELL LIMIT:** `{pair}` @ `{price:.5f}` | RSI: `{rsi:.1f}` | Gap: `{gap:.5f}` | 🕒 Target: `{time_str}`"
     send_telegram_signal(msg)
 
 @sync_bot.message_handler(commands=['status'])
 def handle_status_command(message):
-    """Listens for the /status command and returns the live runtime engine state."""
     if str(message.chat.id) != str(CHAT_ID):
         return
-
     try:
+        # Fixed case-sensitivity for Linux deployments
         import Engine as engine
-        if engine.IS_RUNNING:
-            loop_status = "🟢 **ACTIVE** (Scanning Markets)"
-        else:
-            loop_status = "🔴 **STOPPED** (Engine Inactive)"
+        loop_status = "🟢 ACTIVE" if engine.IS_RUNNING else "🔴 STOPPED"
     except Exception:
-        loop_status = "🔴 **OFFLINE** (Process Terminated)"
+        loop_status = "🔴 OFFLINE"
 
-    current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    
-    status_msg = (
-        f"🖥️ **ENGINE SYSTEM INTEGRITY REPORT** 🖥️\n\n"
-        f"● `Main.py` ──► {loop_status}\n"
-        f"● `Engine.py` ──► 🟢 **CONNECTED** (Data Matrix)\n"
-        f"├── `indicators.py` ──► 🟢 **VERIFIED** (MACD/RSI/Touch Engine)\n"
-        f"├── `state_db.py` ──► 🟢 **ONLINE** (SQLite Cooldowns)\n"
-        f"└── `alerts.py` ──► 🟢 **ONLINE** (Telegram Interface)\n\n"
-        f"📊 **System Clock:** `{current_time}`\n"
-        f"🚀 *Status:* Reporting live system memory state."
-    )
-    
-    sync_bot.reply_to(message, status_msg, parse_mode="Markdown")
+    msg = f"🖥️ **STATUS:** {loop_status} | {datetime.now().strftime('%H:%M:%S')}"
+    sync_bot.reply_to(message, msg, parse_mode="Markdown")
 
 def start_bot_polling():
-    """Runs infinity polling in a background thread to prevent thread blocking."""
     polling_thread = threading.Thread(target=sync_bot.infinity_polling, daemon=True)
     polling_thread.start()
-    print("🤖 Telegram command listener running in the background...")
+    print("🤖 Telegram command listener running...")
