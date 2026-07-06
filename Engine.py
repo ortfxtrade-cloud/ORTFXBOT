@@ -7,8 +7,7 @@ from config import COOLDOWN_TIME, WATCHLIST
 
 # Direct integration bridges
 from indicators import calculate_macd, calculate_rsi
-from state_db import is_on_cooldown, set_cooldown
-from alerts import format_and_send_trade_signal, start_bot_polling
+from alerts import send_buy_signal, send_sell_signal, send_pre_crossing_alert, start_bot_polling
 
 # Shared state memory accessible by admin modules
 IS_RUNNING = True
@@ -18,12 +17,8 @@ def get_yfinance_data(pair, interval):
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
         if df is None or df.empty: 
             return None
-            
-        # Hardening Layer: Detect and completely flatten Multi-Index data column structures
         if isinstance(df.columns, pd.MultiIndex):
             df.columns = df.columns.get_level_values(0)
-            
-        # Enforce strict data type and capitalization schema uniformity
         df.columns = [str(col).strip().capitalize() for col in df.columns]
         return df
     except Exception as e:
@@ -50,61 +45,52 @@ def analyze_ticker(pair):
     rsi = rsi_series.iloc[-1]
     price = df_m5['Close'].iloc[-1]
 
-    # M5 MACD values for setup detection
-    curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
-    curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
-
-    # Calculate absolute differences for current bars
-    gap = abs(curr_m - curr_s)
+    # 5-Minute Timeframe: Pull values going back 3 bars to look for a FRESH crossover
+    m5_m0, m5_m1, m5_m2 = macd_m5.iloc[-1], macd_m5.iloc[-2], macd_m5.iloc[-3]
+    m5_s0, m5_s1, m5_s2 = signal_m5.iloc[-1], signal_m5.iloc[-2], signal_m5.iloc[-3]
     
-    # M1 MACD confirmation values
-    m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
+    # 1-Minute Timeframe: Pull current state to check the latest direction alignment
+    m1_m0, m1_s0 = macd_m1.iloc[-1], signal_m1.iloc[-1]
 
-    # SQLite Persistent Check replacing volatile dictionary rate limits
+    # Import local configuration dynamic check
+    from state_db import is_on_cooldown, set_cooldown
     if is_on_cooldown(pair, COOLDOWN_TIME):
         return
 
-    # --- DYNAMIC ASSET STRUCTURING MATRIX ---
-    is_jpy_pair = "JPY" in pair
-    is_exotic_pair = any(exotic in pair for exotic in ["ZAR", "TRY", "INR", "MXN", "SGD", "HKD", "CNH"])
-    is_standard_major = any(major in pair for major in ["USD", "EUR", "AUD", "GBP", "CAD", "CHF", "NZD"])
+    # Calculate 5-minute distance gaps for your watchlist "About to cross" pre-alerts
+    gap_m5_0 = abs(m5_m0 - m5_s0)
+    gap_m5_1 = abs(m5_m1 - m5_s1)
+    gap_m5_2 = abs(m5_m2 - m5_s2)
 
-    if is_jpy_pair or is_exotic_pair or price > 10:
-        DYNAMIC_THRESHOLD = 0.03
-        PRE_ALERT_ZONE = 0.08  
-    elif is_standard_major:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008  
-    else:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008
+    # SETUP: Check for a fresh, absolute crossover on the 5-MINUTE chart
+    is_m5_bullish_cross = (m5_m1 <= m5_s1) and (m5_m0 > m5_s0)
+    is_m5_bearish_cross = (m5_m1 >= m5_s1) and (m5_m0 < m5_s0)
 
-    # --- STRATEGY EXECUTION TRIGGER LOGIC ---
-    if gap <= DYNAMIC_THRESHOLD:
-        # M1 confirmation: Trend direction matches momentum expansion
-        if m1_m > m1_s and rsi < 70:
-            direction = "BUY"
-        elif m1_m < m1_s and rsi > 30:
-            direction = "SELL"
-        else:
-            return  # No structural confirmation on M1 timeframe
-        
-        # Dispatch the signal via alerts module
-        format_and_send_trade_signal(pair, price, rsi, gap, direction)
-        
-        # Instantly lock asset via SQLite tracking layer to enforce cooldown
+    # --- STRATEGY ROUTING EXECUTIONS ---
+    
+    # 🟢 TARGET BUY RANGE: 5m Cross + 1m Bullish Trend + RSI between 30 and 45
+    if is_m5_bullish_cross and (m1_m0 > m1_s0) and (30.0 <= rsi <= 45.0):
+        send_buy_signal(pair, price, rsi, gap_m5_0)
         set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+    # 🔴 TARGET SELL RANGE: 5m Cross + 1m Bearish Trend + RSI between 55 and 70
+    elif is_m5_bearish_cross and (m1_m0 < m1_s0) and (55.0 <= rsi <= 70.0):
+        send_sell_signal(pair, price, rsi, gap_m5_0)
+        set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        
+    # WATCHLIST ZONE: Check if 5-minute lines are sequentially compressing toward an upcoming cross
+    elif gap_m5_0 < gap_m5_1 < gap_m5_2:
+        bias = "BULLISH" if m5_m0 < m5_s0 else "BEARISH"
+        send_pre_crossing_alert(pair, price, bias)
 
 # =========================================================================
 # 🚀 CORE ENGINE MONITORING LOOP RUNTIME
 # =========================================================================
 if __name__ == "__main__":
-    print(f"✅ Loaded matrix watchlist from config.py: {WATCHLIST}")
+    print(f"✅ Loaded watchlist matrix from config.py: {WATCHLIST}")
     print("📈 Initializing Strategy Scanner System...")
     
-    # Wake up incoming commands listeners
     start_bot_polling()
-    
     print("🚀 Scanner actively running. Scanning matrix watchlists...")
     
     try:
@@ -112,15 +98,12 @@ if __name__ == "__main__":
             for target_pair in WATCHLIST:
                 print(f"Scanning metrics for: {target_pair}")
                 analyze_ticker(target_pair)
-                time.sleep(1.5)  # Safe buffer time delay between API inquiries
+                time.sleep(1.5)  
                 
             print("Iteration sweep complete. Pausing before next market update loop...")
-            time.sleep(60)  # Wait 1 minute before scraping and evaluating data metrics again
+            time.sleep(60)  
             
     except KeyboardInterrupt:
-        # Catch termination command (Ctrl+C) and flip state to False safely
         print("\n🛑 Intercepted shutdown command! Stopping loop matrix...")
         IS_RUNNING = False
-        print("⚠️ Engine stopped. Telegram listener remains open until terminal window exits.")
-        # Keeps the terminal alive just enough so you can verify the status message turned red
         sys.exit(0)
