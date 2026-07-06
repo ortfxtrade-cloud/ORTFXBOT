@@ -72,4 +72,4 @@ def analyze_ticker(pair):
     elif is_standard_major:
         DYNAMIC_THRESHOLD = 0.0003
         PRE_ALERT_ZONE = 0.0008 
-This is the engine
+
