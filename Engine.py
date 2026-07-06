@@ -3,7 +3,7 @@ import sys
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
-from config import COOLDOWN_TIME, WATCHLIST
+from config import COOLDOWN_TIME, STRATEGY_PAIRS
 
 # Direct integration bridges
 from indicators import calculate_macd, calculate_rsi
