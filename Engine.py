@@ -1,10 +1,14 @@
 import time
+import sys
 import yfinance as yf
 import pandas as pd
-from config import COOLDOWN_TIME
-from indicators import calculate_macd, calculate_rsi, calculate_yfinance_velocity
+from datetime import datetime
+from config import COOLDOWN_TIME, WATCHLIST
+
+# Direct integration bridges
+from indicators import calculate_macd, calculate_rsi
 from state_db import is_on_cooldown, set_cooldown
-from alerts import send_telegram_signal
+from alerts import format_and_send_trade_signal, start_bot_polling
 
 # Shared state memory accessible by admin modules
 IS_RUNNING = True
@@ -50,9 +54,8 @@ def analyze_ticker(pair):
     curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
     curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
 
-    # Calculate absolute differences for current and previous bars
+    # Calculate absolute differences for current bars
     gap = abs(curr_m - curr_s)
-    prev_gap = abs(prev_m - prev_s)
     
     # M1 MACD confirmation values
     m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
@@ -71,5 +74,53 @@ def analyze_ticker(pair):
         PRE_ALERT_ZONE = 0.08  
     elif is_standard_major:
         DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008 
+        PRE_ALERT_ZONE = 0.0008  
+    else:
+        DYNAMIC_THRESHOLD = 0.0003
+        PRE_ALERT_ZONE = 0.0008
 
+    # --- STRATEGY EXECUTION TRIGGER LOGIC ---
+    if gap <= DYNAMIC_THRESHOLD:
+        # M1 confirmation: Trend direction matches momentum expansion
+        if m1_m > m1_s and rsi < 70:
+            direction = "BUY"
+        elif m1_m < m1_s and rsi > 30:
+            direction = "SELL"
+        else:
+            return  # No structural confirmation on M1 timeframe
+        
+        # Dispatch the signal via alerts module
+        format_and_send_trade_signal(pair, price, rsi, gap, direction)
+        
+        # Instantly lock asset via SQLite tracking layer to enforce cooldown
+        set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+
+# =========================================================================
+# 🚀 CORE ENGINE MONITORING LOOP RUNTIME
+# =========================================================================
+if __name__ == "__main__":
+    print(f"✅ Loaded matrix watchlist from config.py: {WATCHLIST}")
+    print("📈 Initializing Strategy Scanner System...")
+    
+    # Wake up incoming commands listeners
+    start_bot_polling()
+    
+    print("🚀 Scanner actively running. Scanning matrix watchlists...")
+    
+    try:
+        while IS_RUNNING:
+            for target_pair in WATCHLIST:
+                print(f"Scanning metrics for: {target_pair}")
+                analyze_ticker(target_pair)
+                time.sleep(1.5)  # Safe buffer time delay between API inquiries
+                
+            print("Iteration sweep complete. Pausing before next market update loop...")
+            time.sleep(60)  # Wait 1 minute before scraping and evaluating data metrics again
+            
+    except KeyboardInterrupt:
+        # Catch termination command (Ctrl+C) and flip state to False safely
+        print("\n🛑 Intercepted shutdown command! Stopping loop matrix...")
+        IS_RUNNING = False
+        print("⚠️ Engine stopped. Telegram listener remains open until terminal window exits.")
+        # Keeps the terminal alive just enough so you can verify the status message turned red
+        sys.exit(0)
