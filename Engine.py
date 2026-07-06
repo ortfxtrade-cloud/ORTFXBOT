@@ -78,10 +78,10 @@ def analyze_ticker(pair):
     # --- 👀 HERE ARE YOUR VALUES FOR JPY AND MAJORS ---
     if clean_pair in JPY_PAIRS:
         DYNAMIC_THRESHOLD = 0.03
-        PRE_ALERT_ZONE = 0.03
+        PRE_ALERT_ZONE = 0.06
     elif clean_pair in MAJOR_PAIRS:
         DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0003
+        PRE_ALERT_ZONE = 0.0006
     else:
         return 
 
