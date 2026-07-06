@@ -67,10 +67,6 @@ def analyze_ticker(pair):
     is_exotic_pair = any(exotic in pair for exotic in ["TRY", "ZAR", "MXN"]) 
     is_standard_major = any(major in pair for major in ["EUR", "GBP", "AUD", "NZD", "CHF", "CAD"])
 
-    # Default fallback values to prevent errors
-    DYNAMIC_THRESHOLD = 0.0003
-    PRE_ALERT_ZONE = 0.0008
-
     if is_jpy_pair or is_exotic_pair or price > 100:
         DYNAMIC_THRESHOLD = 0.03
         PRE_ALERT_ZONE = 0.08
