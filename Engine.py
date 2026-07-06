@@ -71,4 +71,4 @@ def analyze_ticker(pair):
         PRE_ALERT_ZONE = 0.08  
     elif is_standard_major:
         DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0
+        PRE_ALERT_ZONE = 0.0008
