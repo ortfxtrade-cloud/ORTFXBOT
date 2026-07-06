@@ -14,18 +14,18 @@ def send_telegram_signal(msg):
     except Exception as e:
         print(f"Signal Routing Error: {e}")
 
-def send_pre_crossing_alert(pair, price, direction_guess):
-    """Dispatches a watch warning alert when an asset's 5m momentum is compressing toward a cross."""
+def send_touching_pre_alert(pair, price, direction_guess):
+    """Dispatches a warning alert when the MACD and Signal lines are touching."""
     current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    target_emoji = "📈" if direction_guess == "BULLISH" else "📉"
+    target_emoji = "💥"
     
     msg = (
-        f"⏳ **5M PRE-CROSSING WATCHLIST ALERT** ⏳\n\n"
+        f"⚡ **5M LINES TOUCHING WATCHLIST ALERT** ⚡\n\n"
         f"**Asset:** `{pair}`\n"
         f"**Current Price:** `{price:.5f}`\n"
-        f"🔄 **Imminent Bias:** {target_emoji} `{direction_guess}`\n\n"
+        f"🔄 **Imminent Cross Bias:** {target_emoji} `{direction_guess}`\n\n"
         f"📅 **Time Logged:** `{current_time}`\n"
-        f"⚠️ *Status:* 5m MACD lines are compressing over 3 bars. Watch this asset for an upcoming crossover."
+        f"⚠️ *Status:* MACD and Signal lines have collided and are touching. Crossover imminent."
     )
     send_telegram_signal(msg)
 
@@ -61,9 +61,6 @@ def send_sell_signal(pair, price, rsi, gap):
     )
     send_telegram_signal(msg)
 
-# =========================================================================
-# ⚙️ DYNAMIC INCOMING COMMAND HANDLER (/status)
-# =========================================================================
 @sync_bot.message_handler(commands=['status'])
 def handle_status_command(message):
     """Listens for the /status command and returns the live runtime engine state."""
@@ -71,7 +68,7 @@ def handle_status_command(message):
         return
 
     try:
-        import engine
+        import Engine as engine
         if engine.IS_RUNNING:
             loop_status = "🟢 **ACTIVE** (Scanning Markets)"
         else:
@@ -83,9 +80,9 @@ def handle_status_command(message):
     
     status_msg = (
         f"🖥️ **ENGINE SYSTEM INTEGRITY REPORT** 🖥️\n\n"
-        f"● `main.py` ──► {loop_status}\n"
-        f"● `engine.py` ──► 🟢 **CONNECTED** (Data Matrix)\n"
-        f"├── `indicators.py` ──► 🟢 **VERIFIED** (MACD/RSI/Slope Matrix)\n"
+        f"● `Main.py` ──► {loop_status}\n"
+        f"● `Engine.py` ──► 🟢 **CONNECTED** (Data Matrix)\n"
+        f"├── `indicators.py` ──► 🟢 **VERIFIED** (MACD/RSI/Touch Engine)\n"
         f"├── `state_db.py` ──► 🟢 **ONLINE** (SQLite Cooldowns)\n"
         f"└── `alerts.py` ──► 🟢 **ONLINE** (Telegram Interface)\n\n"
         f"📊 **System Clock:** `{current_time}`\n"
