@@ -248,4 +248,4 @@ if __name__ == "__main__":
 
     print("Background components online. Starting command sync listener...")
     sync_bot.infinity_polling()
- Is there any problem with this codr
+
