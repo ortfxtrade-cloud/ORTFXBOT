@@ -3,11 +3,11 @@ import sys
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
-from config import COOLDOWN_TIME, STRATEGY_PAIRS
+from config import COOLDOWN_TIME, WATCHLIST
 
 # Direct integration bridges
 from indicators import calculate_macd, calculate_rsi
-from alerts import send_buy_signal, send_sell_signal, send_pre_crossing_alert, start_bot_polling
+from alerts import send_buy_signal, send_sell_signal, send_touching_pre_alert, start_bot_polling
 
 # Shared state memory accessible by admin modules
 IS_RUNNING = True
@@ -45,43 +45,62 @@ def analyze_ticker(pair):
     rsi = rsi_series.iloc[-1]
     price = df_m5['Close'].iloc[-1]
 
-    # 5-Minute Timeframe: Pull values going back 3 bars to look for a FRESH crossover
-    m5_m0, m5_m1, m5_m2 = macd_m5.iloc[-1], macd_m5.iloc[-2], macd_m5.iloc[-3]
-    m5_s0, m5_s1, m5_s2 = signal_m5.iloc[-1], signal_m5.iloc[-2], signal_m5.iloc[-3]
+    # 5-Minute Timeframe: Pull current and previous values
+    m5_m0, m5_m1 = macd_m5.iloc[-1], macd_m5.iloc[-2]
+    m5_s0, m5_s1 = signal_m5.iloc[-1], signal_m5.iloc[-2]
     
-    # 1-Minute Timeframe: Pull current state to check the latest direction alignment
+    # 1-Minute Timeframe: Pull current state
     m1_m0, m1_s0 = macd_m1.iloc[-1], signal_m1.iloc[-1]
 
-    # Import local configuration dynamic check
     from state_db import is_on_cooldown, set_cooldown
     if is_on_cooldown(pair, COOLDOWN_TIME):
         return
 
-    # Calculate 5-minute distance gaps for your watchlist "About to cross" pre-alerts
-    gap_m5_0 = abs(m5_m0 - m5_s0)
-    gap_m5_1 = abs(m5_m1 - m5_s1)
-    gap_m5_2 = abs(m5_m2 - m5_s2)
+    # Calculate absolute current gap on 5-minute chart
+    gap_m5 = abs(m5_m0 - m5_s0)
+    
+    # =========================================================================
+    # 🗂️ DYNAMIC ASSET STRUCTURING MATRIX (FROM YOUR SCREENSHOT)
+    # =========================================================================
+    is_jpy_pair = "JPY" in pair
+    # Note: Define your lists or string matches for exotics/majors if needed
+    is_exotic_pair = any(exotic in pair for exotic in ["TRY", "ZAR", "MXN"]) 
+    is_standard_major = any(major in pair for major in ["EUR", "GBP", "AUD", "NZD", "CHF", "CAD"])
 
-    # SETUP: Check for a fresh, absolute crossover on the 5-MINUTE chart
+    # Default fallback values to prevent errors
+    DYNAMIC_THRESHOLD = 0.0003
+    PRE_ALERT_ZONE = 0.0008
+
+    if is_jpy_pair or is_exotic_pair or price > 100:
+        DYNAMIC_THRESHOLD = 0.03
+        PRE_ALERT_ZONE = 0.08
+    elif is_standard_major:
+        DYNAMIC_THRESHOLD = 0.0003
+        PRE_ALERT_ZONE = 0.0008 # Adjusted from text cursor '0.0' to represent an active zone
+
+    # Check if the raw gap falls inside your designated raw pre-alert space
+    is_in_pre_alert_zone = gap_m5 <= PRE_ALERT_ZONE
+
+    # SETUP: Check for a completed crossover on the 5-MINUTE chart
     is_m5_bullish_cross = (m5_m1 <= m5_s1) and (m5_m0 > m5_s0)
     is_m5_bearish_cross = (m5_m1 >= m5_s1) and (m5_m0 < m5_s0)
 
     # --- STRATEGY ROUTING EXECUTIONS ---
     
-    # 🟢 TARGET BUY RANGE: 5m Cross + 1m Bullish Trend + RSI between 30 and 45
+    # 🟢 TARGET BUY SIGNAL: Fresh 5m Cross + 1m Bullish Trend + RSI between 30 and 45
     if is_m5_bullish_cross and (m1_m0 > m1_s0) and (30.0 <= rsi <= 45.0):
-        send_buy_signal(pair, price, rsi, gap_m5_0)
+        send_buy_signal(pair, price, rsi, gap_m5)
         set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         
-    # 🔴 TARGET SELL RANGE: 5m Cross + 1m Bearish Trend + RSI between 55 and 70
+    # 🔴 TARGET SELL SIGNAL: Fresh 5m Cross + 1m Bearish Trend + RSI between 55 and 70
     elif is_m5_bearish_cross and (m1_m0 < m1_s0) and (55.0 <= rsi <= 70.0):
-        send_sell_signal(pair, price, rsi, gap_m5_0)
+        send_sell_signal(pair, price, rsi, gap_m5)
         set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         
-    # WATCHLIST ZONE: Check if 5-minute lines are sequentially compressing toward an upcoming cross
-    elif gap_m5_0 < gap_m5_1 < gap_m5_2:
+    # ⏳ WATCHLIST ZONE: If lines haven't crossed yet but are within your PRE_ALERT_ZONE
+    elif is_in_pre_alert_zone:
         bias = "BULLISH" if m5_m0 < m5_s0 else "BEARISH"
-        send_pre_crossing_alert(pair, price, bias)
+        send_touching_pre_alert(pair, price, bias)
 
 # =========================================================================
 # 🚀 CORE ENGINE MONITORING LOOP RUNTIME
