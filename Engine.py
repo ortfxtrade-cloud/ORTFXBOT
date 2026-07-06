@@ -1,17 +1,23 @@
-
 import time
 import sys
 import yfinance as yf
 import pandas as pd
 from datetime import datetime
-from config import COOLDOWN_TIME, STRATEGY_PAIRS
+from config import COOLDOWN_TIME
 
 # Direct integration bridges
 from indicators import calculate_macd, calculate_rsi
-from alerts import send_buy_signal, send_sell_signal, send_touching_pre_alert, start_bot_polling
+from alerts import send_buy_signal, send_sell_signal, start_bot_polling
 
 # Shared state memory accessible by admin modules
 IS_RUNNING = True
+
+# --- EXPLICIT PAIR LISTS ---
+JPY_PAIRS = ["USDJPY", "EURJPY", "GBPJPY", "AUDJPY", "NZDJPY", "CHFJPY", "CADJPY"]
+MAJOR_PAIRS = ["EURUSD", "GBPUSD", "AUDUSD", "NZDUSD", "USDCAD", "USDCHF", "EURGBP", "EURCAD", "EURAUD", "EURNZD", "GBPAUD", "GBPCAD"]
+
+# Combine both lists to create your total scanning matrix watchlist
+ALL_STRATEGY_PAIRS = JPY_PAIRS + MAJOR_PAIRS
 
 def clean_forex_ticker(pair):
     pair_str = str(pair).strip().upper()
@@ -34,8 +40,10 @@ def get_yfinance_data(pair, interval):
         return None
 
 def analyze_ticker(pair):
-    df_m5 = get_yfinance_data(pair, "5m")
-    df_m1 = get_yfinance_data(pair, "1m")
+    clean_pair = str(pair).strip().upper().replace("=X", "")
+    
+    df_m5 = get_yfinance_data(clean_pair, "5m")
+    df_m1 = get_yfinance_data(clean_pair, "1m")
 
     if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
         return
@@ -61,26 +69,21 @@ def analyze_ticker(pair):
     m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
 
     from state_db import is_on_cooldown, set_cooldown
-    if is_on_cooldown(pair, COOLDOWN_TIME):
+    if is_on_cooldown(clean_pair, COOLDOWN_TIME):
         return
 
     # --- CODE RULES FROM YOUR SCREENSHOT ---
     gap = abs(curr_m - curr_s)
-    prev_gap = abs(prev_m - prev_s)
     
-    # --- DYNAMIC ASSET STRUCTURING MATRIX ---
-    is_jpy_pair = "JPY" in pair
-    is_standard_major = any(major in pair for major in ["EUR", "GBP", "AUD", "NZD", "CHF", "CAD"])
-
-    if is_jpy_pair or price > 100:
+    # --- 👀 HERE ARE YOUR VALUES FOR JPY AND MAJORS ---
+    if clean_pair in JPY_PAIRS:
         DYNAMIC_THRESHOLD = 0.03
-        PRE_ALERT_ZONE = 0.05    
-    elif is_standard_major:
+        PRE_ALERT_ZONE = 0.03
+    elif clean_pair in MAJOR_PAIRS:
         DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0005  
-
-    # Check if lines have compressed into your raw pre-alert target space
-    is_in_pre_alert_zone = gap <= PRE_ALERT_ZONE
+        PRE_ALERT_ZONE = 0.0003
+    else:
+        return 
 
     # SETUP: Check for completed crossovers across the 5-Minute chart blocks
     is_m5_bullish_cross = (prev_m <= prev_s) and (curr_m > curr_s)
@@ -90,40 +93,10 @@ def analyze_ticker(pair):
     
     # 🟢 BUY LIMIT SIGNAL
     if is_m5_bullish_cross and (m1_m > m1_s) and (30.0 <= rsi <= 45.0) and (gap >= DYNAMIC_THRESHOLD):
-        send_buy_signal(pair, price, rsi, gap)
-        set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
+        send_buy_signal(clean_pair, price, rsi, gap)
+        set_cooldown(clean_pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
         
     # 🔴 SELL LIMIT SIGNAL
     elif is_m5_bearish_cross and (m1_m < m1_s) and (55.0 <= rsi <= 70.0) and (gap >= DYNAMIC_THRESHOLD):
-        send_sell_signal(pair, price, rsi, gap)
-        set_cooldown(pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
-        
-    # ⏳ WATCHLIST ZONE (TOUCHING PRE-ALERT)
-    elif is_in_pre_alert_zone:
-        bias = "BULLISH" if curr_m < curr_s else "BEARISH"
-        send_touching_pre_alert(pair, price, bias)
-
-# =========================================================================
-# 🚀 MONITORING RUNTIME ENGINE LOOP
-# =========================================================================
-if __name__ == "__main__":
-    print(f"✅ Loaded Forex watchlist matrix from config.py: {STRATEGY_PAIRS}")
-    print("📈 Initializing Strategy Scanner System...")
-    
-    start_bot_polling()
-    print("🚀 Scanner actively running. Scanning matrix watchlists...")
-    
-    try:
-        while IS_RUNNING:
-            for target_pair in STRATEGY_PAIRS:
-                print(f"Scanning metrics for: {target_pair}")
-                analyze_ticker(target_pair)
-                time.sleep(1.5)  
-                
-            print("Iteration sweep complete. Pausing before next market update loop...")
-            time.sleep(60)  
-            
-    except KeyboardInterrupt:
-        print("\n🛑 Intercepted shutdown command! Stopping loop matrix...")
-        IS_RUNNING = False
-        sys.exit(0)
+        send_sell_signal(clean_pair, price, rsi, gap)
+        set_cooldown(clean_pair, datetime.now().strftime("%Y-%m-%d %H:%M:%S"))
