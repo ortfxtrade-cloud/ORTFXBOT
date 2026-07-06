@@ -1,4 +1,4 @@
-Import time
+import time
 import yfinance as yf
 import pandas as pd
 from config import COOLDOWN_TIME
