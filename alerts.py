@@ -1,4 +1,3 @@
-
 import telebot
 import threading
 from datetime import datetime, timedelta
@@ -23,18 +22,14 @@ def send_telegram_signal(msg):
     except Exception as e:
         print(f"Signal Routing Error: {e}")
 
-def send_touching_pre_alert(pair, price, direction_guess):
-    time_str = get_rounded_future_time()
-    emoji = "⚡" if direction_guess == "BULLISH" else "🚨"
-    msg = f"{emoji} **TOUCHING:** `{pair}` @ `{price:.5f}` ({direction_guess}) | 🕒 Expiry Target: `{time_str}`"
-    send_telegram_signal(msg)
-
 def send_buy_signal(pair, price, rsi, gap):
+    """Compact 1-line style buy limit target setup"""
     time_str = get_rounded_future_time()
     msg = f"🟢 **BUY LIMIT:** `{pair}` @ `{price:.5f}` | RSI: `{rsi:.1f}` | Gap: `{gap:.5f}` | 🕒 Target: `{time_str}`"
     send_telegram_signal(msg)
 
 def send_sell_signal(pair, price, rsi, gap):
+    """Compact 1-line style sell limit target setup"""
     time_str = get_rounded_future_time()
     msg = f"🔴 **SELL LIMIT:** `{pair}` @ `{price:.5f}` | RSI: `{rsi:.1f}` | Gap: `{gap:.5f}` | 🕒 Target: `{time_str}`"
     send_telegram_signal(msg)
@@ -44,7 +39,6 @@ def handle_status_command(message):
     if str(message.chat.id) != str(CHAT_ID):
         return
     try:
-        # Fixed case-sensitivity for Linux deployments
         import Engine as engine
         loop_status = "🟢 ACTIVE" if engine.IS_RUNNING else "🔴 STOPPED"
     except Exception:
