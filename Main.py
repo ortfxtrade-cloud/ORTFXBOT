@@ -20,16 +20,14 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- CONFIGURATION FROM ENVIRONMENT ---
-TOKEN = "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08"
-CHAT_ID = "8701685996"
-FINNHUB_API_KEY = "D8sh4dpr01qq7apvl2egd8sh4dpr01qq7apvl2f0"
-DEPLOY_HOOK = "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
+# --- CONFIGURATION FROM ENVIRONMENT (SECURE WITH FALLBACKS) ---
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0")
+CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
+DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
 
-# Initialize Unified Telebot Engine
+# Initialize Bot
 sync_bot = telebot.TeleBot(TOKEN)
 
-# Comprehensive Watchlist (Added your Exotic and Volatile Assets)
 STRATEGY_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
     "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
@@ -39,22 +37,18 @@ STRATEGY_PAIRS = [
 ]
 
 last_alerts = {}
+alert_lock = threading.Lock()
 
 # --- NATIVE YFINANCE VELOCITY CHECKER ---
-def calculate_yfinance_velocity(df_m1):
+def calculate_yfinance_velocity(series_m1):
     try:
-        if df_m1 is None or len(df_m1) < 5:
+        if series_m1 is None or len(series_m1) < 5:
             return "⚠️ UNCONFIRMED (Data Missing)"
         
-        recent_closes = df_m1['Close'].tail(5)
-        max_price = recent_closes.max()
-        min_price = recent_closes.min()
-        volatility = max_price - min_price
+        recent_closes = series_m1.tail(5)
+        volatility = recent_closes.max() - recent_closes.min()
         
-        if volatility > 0:
-            return "🟢 SAFE (Active Liquidity)"
-        else:
-            return "⚠️ LOW VELOCITY (Stale Session)"
+        return "🟢 SAFE (Active Liquidity)" if volatility > 0 else "⚠️ LOW VELOCITY (Stale Session)"
     except Exception:
         return "⚠️ UNCONFIRMED (Calculation Error)"
 
@@ -84,97 +78,104 @@ def get_yfinance_data(pair, interval):
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
         if df is None or df.empty: 
             return None
+        
+        # Robust flattening of multi-index data structures native to newer yfinance versions
         if isinstance(df.columns, pd.MultiIndex):
-            df.columns = df.columns.get_level_values(0)
-        return df
-    except Exception:
+            if 'Close' in df.columns.get_level_values(0):
+                extracted = df.xs('Close', axis=1, level=0).squeeze()
+                return extracted if isinstance(extracted, pd.Series) else extracted.iloc[:, 0]
+        elif 'Close' in df.columns:
+            return df['Close'].squeeze()
+            
+        return None
+    except Exception as e:
+        print(f"Data Fetch Error for {pair}: {e}")
         return None
 
-# --- MACD & RSI STRATEGY ANALYSIS (CORE DYNAMIC SYSTEM) ---
+# --- MACD & RSI STRATEGY ANALYSIS ---
 def analyze_ticker(pair):
-    df_m5 = get_yfinance_data(pair, "5m")
-    df_m1 = get_yfinance_data(pair, "1m")
+    close_m5 = get_yfinance_data(pair, "5m")
+    close_m1 = get_yfinance_data(pair, "1m")
 
-    if df_m5 is None or df_m1 is None or len(df_m5) < 40 or len(df_m1) < 40:
+    if close_m5 is None or close_m1 is None or len(close_m5) < 40 or len(close_m1) < 40:
         return
 
-    macd_m5, signal_m5 = calculate_macd(df_m5['Close'])
-    macd_m1, signal_m1 = calculate_macd(df_m1['Close'])
+    macd_m5, signal_m5 = calculate_macd(close_m5)
+    macd_m1, signal_m1 = calculate_macd(close_m1)
     
-    if macd_m5 is None or signal_m5 is None or macd_m1 is None or signal_m1 is None:
-        return
-        
-    rsi_series = calculate_rsi(df_m5['Close'])
+    rsi_series = calculate_rsi(close_m5)
     if rsi_series.empty:
         return
     
-    rsi = rsi_series.iloc[-1]
-    price = df_m5['Close'].iloc[-1]
+    rsi = float(rsi_series.iloc[-1])
+    price = float(close_m5.iloc[-1])
 
-    # M5 MACD values for setup detection
-    curr_m, prev_m = macd_m5.iloc[-1], macd_m5.iloc[-2]
-    curr_s, prev_s = signal_m5.iloc[-1], signal_m5.iloc[-2]
+    curr_m, prev_m = float(macd_m5.iloc[-1]), float(macd_m5.iloc[-2])
+    curr_s, prev_s = float(signal_m5.iloc[-1]), float(signal_m5.iloc[-2])
 
-    # Calculate absolute differences for current and previous bars
     gap = abs(curr_m - curr_s)
     prev_gap = abs(prev_m - prev_s)
     
-    # M1 MACD confirmation values
-    m1_m, m1_s = macd_m1.iloc[-1], signal_m1.iloc[-1]
+    m1_m, m1_s = float(macd_m1.iloc[-1]), float(macd_m1.iloc[-1])
 
-    # Rate limiting guard
     alert_key = f"{pair}_alert"
-    if time.time() - last_alerts.get(alert_key, 0) < 300:
-        return
+    with alert_lock:
+        if time.time() - last_alerts.get(alert_key, 0) < 300:
+            return
 
     # --- DYNAMIC ASSET STRUCTURING MATRIX ---
     is_jpy_pair = "JPY" in pair
     is_exotic_pair = any(exotic in pair for exotic in ["ZAR", "TRY", "INR", "MXN", "SGD", "HKD", "CNH"])
-    is_standard_major = any(major in pair for major in ["USD", "EUR", "AUD", "GBP", "CAD", "CHF", "NZD"])
 
     if is_jpy_pair or is_exotic_pair or price > 10:
         DYNAMIC_THRESHOLD = 0.03
         PRE_ALERT_ZONE = 0.08  
-    elif is_standard_major:
-        DYNAMIC_THRESHOLD = 0.0003
-        PRE_ALERT_ZONE = 0.0008  
     else:
         DYNAMIC_THRESHOLD = 0.0003
         PRE_ALERT_ZONE = 0.0008
 
-    # --- SQUEEZE DETECTOR (FLATLINE COMPRESSION GUARD) ---
     if gap < DYNAMIC_THRESHOLD:
         return
 
-    # Crossover State Definition
     has_crossed_bullish = prev_m < prev_s and curr_m > curr_s
     has_crossed_bearish = prev_m > prev_s and curr_m < curr_s
     is_shrinking = gap < prev_gap
 
     # --- STRATEGY SIGNAL ROUTING ---
+    triggered = False
+    msg_to_send = ""
+
     if 30 <= rsi <= 45:
-        # Pre-Alert Warning Stage
         if is_shrinking and not has_crossed_bullish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential BUY.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-        # Execution Stage
+            velocity = calculate_yfinance_velocity(close_m1)
+            msg_to_send = f"🔍 *[GET READY]* {pair}\nLines converging for potential BUY.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*"
+            triggered = True
         elif has_crossed_bullish and m1_m > m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
+            velocity = calculate_yfinance_velocity(close_m1)
+            msg_to_send = f"🔥⬆️✅ *[BUY]* {pair}\nBullish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*"
+            triggered = True
 
     elif 55 <= rsi <= 70:
-        # Pre-Alert Warning Stage
         if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"🔍 *[GET READY]* {pair}\nLines converging for potential SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
-            last_alerts[alert_key] = time.time()
-        # Execution Stage
+            velocity = calculate_yfinance_velocity(close_m1)
+            msg_to_send = f"🔍 *[GET READY]* {pair}\nLines converging for potential SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*"
+            triggered = True
         elif has_crossed_bearish and m1_m < m1_s:
-            velocity = calculate_yfinance_velocity(df_m1)
-            send_telegram_signal(f"📉⬇️✅ *[SELL]* {pair}\nBearish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*")
+            velocity = calculate_yfinance_velocity(close_m1)
+            msg_to_send = f"📉⬇️✅ *[SELL]* {pair}\nBearish cross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVelocity: *{velocity}*"
+            triggered = True
+
+    if triggered:
+        with alert_lock:
             last_alerts[alert_key] = time.time()
+        send_telegram_signal(msg_to_send)
+
+def responsive_sleep(seconds):
+    """Sleeps in short intervals to check if IS_RUNNING flag turns False instantly."""
+    for _ in range(int(seconds)):
+        if not IS_RUNNING:
+            break
+        time.sleep(1)
 
 def strategy_loop():
     global IS_RUNNING
@@ -190,13 +191,14 @@ def strategy_loop():
                         analyze_ticker(pair)
                     except Exception as e:
                         print(f"Error checking {pair}: {e}")
-                    time.sleep(2)
-                time.sleep(300)
+                    time.sleep(1)
+                
+                responsive_sleep(300)
             else:
-                time.sleep(5)
+                time.sleep(2)
         else:
-            time.sleep(3600)
-
+            time.sleep(60)
+            
 # --- TELEGRAM ADMIN INTERFACE ---
 @sync_bot.message_handler(commands=['start_bot'])
 def start_bot_cmd(message):
@@ -220,8 +222,7 @@ def status_cmd(message):
 
 @sync_bot.message_handler(commands=['deploy'])
 def deploy_cmd(message):
-    if str(message.chat.id) != str(CHAT_ID): 
-        return
+    if str(message.chat.id) != str(CHAT_ID): return
     if not DEPLOY_HOOK:
         sync_bot.reply_to(message, "❌ Deploy hook missing from environment setup.")
         return
@@ -248,4 +249,3 @@ if __name__ == "__main__":
 
     print("Background components online. Starting command sync listener...")
     sync_bot.infinity_polling()
-
