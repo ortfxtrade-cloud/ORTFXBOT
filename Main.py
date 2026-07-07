@@ -24,12 +24,12 @@ def run_web_server():
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
-OCR_API_KEY = os.environ.get("OCR_API_KEY", "K89169183488957") # Replace with your real OCR.space key
+OCR_API_KEY = os.environ.get("OCR_API_KEY", "K89169183488957") 
 
 # Initialize Bot
 sync_bot = telebot.TeleBot(TOKEN)
 
-# Made this global list dynamic
+# Dynamic Watchlist Pool
 STRATEGY_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
     "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
@@ -38,13 +38,12 @@ STRATEGY_PAIRS = [
 
 last_alerts = {}
 alert_lock = threading.Lock()
-pairs_lock = threading.Lock()  # Lock to ensure thread safety when modifying the watchlist
+pairs_lock = threading.Lock()  
 
 # --- HELPER LOGIC FOR DYNAMIC PAIR PARSING ---
 def clean_and_add_pairs(text_input):
     """Parses text, extracts valid 6-character forex pairs, and updates the watchlist."""
     import re
-    # Find all words that look like forex combinations (e.g., EURUSD, EUR/USD, GBP-USD)
     potential_pairs = re.findall(r'[A-Za-z]{3}[/-]?[A-Za-z]{3}', text_input)
     
     added_pairs = []
@@ -193,7 +192,6 @@ def strategy_loop():
         current_day = time.gmtime().tm_wday
         if current_day < 5: 
             if IS_RUNNING:
-                # We copy the list references safely before scanning to prevent threading iteration errors
                 with pairs_lock:
                     current_watchlist = list(STRATEGY_PAIRS)
                 
@@ -255,37 +253,36 @@ def add_pairs_text_cmd(message):
     else:
         sync_bot.reply_to(message, "⚠️ No new or valid 6-letter asset pairs were detected.")
 
-# Feature: Add pairs via screenshot ingestion (OCR Engine)
+# Feature: Add pairs via screenshot ingestion (OCR Engine 3 for Handwriting)
 @sync_bot.message_handler(content_types=['photo'])
 def handle_image_watchlist(message):
     if str(message.chat.id) != str(CHAT_ID): return
     
-    sync_bot.reply_to(message, "⚡ Processing image layout. Scanning text for valid asset keys...")
+    sync_bot.reply_to(message, "⚡ Processing note layout. Scanning handwriting for asset keys...")
     try:
-        # Get image files details from Telegram cloud endpoints
         file_info = sync_bot.get_file(message.photo[-1].file_id)
         file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
         
-        # Stream remote routing request straight into cloud OCR space platform
         payload = {
             'url': file_url,
             'apikey': OCR_API_KEY,
             'isOverlayRequired': False,
-            'scale': True
+            'scale': True,            
+            'OCREngine': 3            
         }
-        response = requests.post("https://api.ocr.space/parse/image", data=payload, timeout=15).json()
+        response = requests.post("https://api.ocr.space/parse/image", data=payload, timeout=20).json()
         
         if response.get("OCRExitCode") == 1:
             parsed_text = response["ParsedResults"][0]["ParsedText"]
             added = clean_and_add_pairs(parsed_text)
             if added:
-                sync_bot.reply_to(message, f"🎉 OCR Extraction Success!\nAdded to strategy loop:\n`{', '.join(added)}`", parse_mode="Markdown")
+                sync_bot.reply_to(message, f"🎉 Handwriting OCR Success!\nAdded to strategy loop:\n`{', '.join(added)}`", parse_mode="Markdown")
             else:
-                sync_bot.reply_to(message, f"🔍 Image read completed, but no *new* valid forex pairs found.\nText scanned:\n`{parsed_text}`", parse_mode="Markdown")
+                sync_bot.reply_to(message, f"🔍 Note scan completed, but no *new* valid forex pairs found.\nText scanned:\n`{parsed_text}`", parse_mode="Markdown")
         else:
-            sync_bot.reply_to(message, "❌ OCR failed to read text. Please ensure the chart symbols are clearly visible.")
+            sync_bot.reply_to(message, f"❌ OCR Engine error: {response.get('ErrorMessage')}")
     except Exception as e:
-        sync_bot.reply_to(message, f"❌ Error reading image asset matrix: {e}")
+        sync_bot.reply_to(message, f"❌ Error processing handwritten notebook: {e}")
 
 @sync_bot.message_handler(commands=['deploy'])
 def deploy_cmd(message):
