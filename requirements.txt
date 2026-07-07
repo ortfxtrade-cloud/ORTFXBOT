@@ -1,5 +1,6 @@
-Flask
 pyTelegramBotAPI
+flask
 yfinance
 pandas
+numpy
 requests
