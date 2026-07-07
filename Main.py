@@ -26,23 +26,60 @@ CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
 OCR_API_KEY = os.environ.get("OCR_API_KEY", "K89169183488957") 
 
+# JSONBin Configuration (Replace these with your real cloud data or add to Render Env Variables)
+JSONBIN_KEY = os.environ.get("JSONBIN_KEY", "$2a$10$r5OJ.Ut/MaT2dYCZTZ4Im./0w3SvtdviC1c/IAWNNaMLmYGySb7T.")
+JSONBIN_ID = os.environ.get("JSONBIN_ID", "6a4d4662f5f4af5e296dcd83")
+
 # Initialize Bot
 sync_bot = telebot.TeleBot(TOKEN)
 
-# Dynamic Watchlist Pool
+# Fallback defaults (used only if the cloud bin fails to respond)
 STRATEGY_PAIRS = [
-    "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
-    "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
-    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD"
+    "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF"
 ]
 
 last_alerts = {}
 alert_lock = threading.Lock()
 pairs_lock = threading.Lock()  
 
+# --- CLOUD PERSISTENCE DATABASE LOGIC ---
+def load_watchlist_from_cloud():
+    """Fetches your saved watchlist from JSONBin cloud storage on startup."""
+    global STRATEGY_PAIRS
+    if "YOUR_JSONBIN" in JSONBIN_ID:
+        print("Using local code defaults. Setup JSONBin for permanent saves.")
+        return
+    try:
+        headers = {"X-Master-Key": JSONBIN_KEY}
+        url = f"https://api.jsonbin.v3/b/{JSONBIN_ID}/latest"
+        response = requests.get(url, headers=headers, timeout=10).json()
+        if "record" in response:
+            with pairs_lock:
+                STRATEGY_PAIRS = list(response["record"])
+            print(f"Cloud load complete! Syncing: {STRATEGY_PAIRS}")
+    except Exception as e:
+        print(f"Cloud Sync Read Fail, fallback to default code pairs: {e}")
+
+def save_watchlist_to_cloud():
+    """Pushes your running edits to the JSONBin cloud storage vault."""
+    if "YOUR_JSONBIN" in JSONBIN_ID:
+        return
+    try:
+        headers = {
+            "X-Master-Key": JSONBIN_KEY,
+            "Content-Type": "application/json"
+        }
+        url = f"https://api.jsonbin.v3/b/{JSONBIN_ID}"
+        with pairs_lock:
+            data = list(STRATEGY_PAIRS)
+        requests.put(url, json=data, headers=headers, timeout=10)
+        print("Watchlist saved successfully to cloud vault.")
+    except Exception as e:
+        print(f"Cloud Storage Update Failed: {e}")
+
 # --- HELPER LOGIC FOR DYNAMIC PAIR PARSING ---
 def clean_and_add_pairs(text_input):
-    """Parses text, extracts valid 6-character forex pairs, and updates the watchlist."""
+    """Parses text, extracts valid 6-character forex pairs, updates local list and saves to cloud."""
     import re
     potential_pairs = re.findall(r'[A-Za-z]{3}[/-]?[A-Za-z]{3}', text_input)
     
@@ -53,6 +90,9 @@ def clean_and_add_pairs(text_input):
             if len(cleaned) == 6 and cleaned not in STRATEGY_PAIRS:
                 STRATEGY_PAIRS.append(cleaned)
                 added_pairs.append(cleaned)
+                
+    if added_pairs:
+        save_watchlist_to_cloud() # Permanent backup save
     return added_pairs
 
 # --- NATIVE YFINANCE VELOCITY CHECKER ---
@@ -238,7 +278,7 @@ def view_watchlist_cmd(message):
         pairs_string = ", ".join(STRATEGY_PAIRS)
     sync_bot.reply_to(message, f"📋 *Active Watchlist ({len(STRATEGY_PAIRS)}):*\n`{pairs_string}`", parse_mode="Markdown")
 
-# Feature: Add pairs via custom text command (e.g. /add EURCAD, AUDNZD)
+# Feature: Add pairs via text
 @sync_bot.message_handler(commands=['add'])
 def add_pairs_text_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
@@ -249,11 +289,36 @@ def add_pairs_text_cmd(message):
         
     added = clean_and_add_pairs(raw_text)
     if added:
-        sync_bot.reply_to(message, f"✅ Successfully added to scanning pool:\n`{', '.join(added)}`", parse_mode="Markdown")
+        sync_bot.reply_to(message, f"✅ Successfully added & saved to cloud:\n`{', '.join(added)}`", parse_mode="Markdown")
     else:
         sync_bot.reply_to(message, "⚠️ No new or valid 6-letter asset pairs were detected.")
 
-# Feature: Add pairs via screenshot ingestion (OCR Engine 3 for Handwriting)
+# New Feature: Remove pairs from watchlist permanently
+@sync_bot.message_handler(commands=['remove'])
+def remove_pairs_cmd(message):
+    if str(message.chat.id) != str(CHAT_ID): return
+    raw_text = message.text.replace('/remove', '').strip().upper()
+    if not raw_text:
+        sync_bot.reply_to(message, "⚠️ Usage: `/remove GBPUSD`", parse_mode="Markdown")
+        return
+
+    removed_pairs = []
+    with pairs_lock:
+        # Match any 6 letter configuration spacing out strings
+        import re
+        targets = re.findall(r'[A-Z]{6}', raw_text)
+        for target in targets:
+            if target in STRATEGY_PAIRS:
+                STRATEGY_PAIRS.remove(target)
+                removed_pairs.append(target)
+
+    if removed_pairs:
+        save_watchlist_to_cloud() # Instantly back up structural edits
+        sync_bot.reply_to(message, f"❌ Removed from cloud scanner list:\n`{', '.join(removed_pairs)}`", parse_mode="Markdown")
+    else:
+        sync_bot.reply_to(message, "⚠️ Pair not found in the active watchlist.")
+
+# Feature: Add pairs via handwritten note or screenshot
 @sync_bot.message_handler(content_types=['photo'])
 def handle_image_watchlist(message):
     if str(message.chat.id) != str(CHAT_ID): return
@@ -276,7 +341,7 @@ def handle_image_watchlist(message):
             parsed_text = response["ParsedResults"][0]["ParsedText"]
             added = clean_and_add_pairs(parsed_text)
             if added:
-                sync_bot.reply_to(message, f"🎉 Handwriting OCR Success!\nAdded to strategy loop:\n`{', '.join(added)}`", parse_mode="Markdown")
+                sync_bot.reply_to(message, f"🎉 Handwriting OCR Success!\nSaved to Cloud Watchlist:\n`{', '.join(added)}`", parse_mode="Markdown")
             else:
                 sync_bot.reply_to(message, f"🔍 Note scan completed, but no *new* valid forex pairs found.\nText scanned:\n`{parsed_text}`", parse_mode="Markdown")
         else:
@@ -302,6 +367,9 @@ def deploy_cmd(message):
 
 # --- INIT AND RUN ---
 if __name__ == "__main__":
+    # Pull existing saved pairs down from cloud database before launching strategy loops
+    load_watchlist_from_cloud()
+
     t_web = threading.Thread(target=run_web_server)
     t_web.daemon = True
     t_web.start()
