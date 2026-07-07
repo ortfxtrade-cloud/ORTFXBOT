@@ -21,7 +21,7 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT (SECURE WITH FALLBACKS) ---
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAH_E703LLE-rpV6mpOZh7ifd9_UpH85pb0")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
 
