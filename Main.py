@@ -14,40 +14,55 @@ IS_RUNNING = True
 @app.route('/')
 def home():
     status = "RUNNING" if IS_RUNNING else "STOPPED"
-    return f"System status: {status}. Monitoring market strategies 24/5."
+    return f"System status: {status}. Monitoring {len(STRATEGY_PAIRS)} market strategies 24/5."
 
 def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- CONFIGURATION FROM ENVIRONMENT (SECURE WITH FALLBACKS) ---
+# --- CONFIGURATION FROM ENVIRONMENT ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
+OCR_API_KEY = os.environ.get("OCR_API_KEY", "K89169183488957") # Replace with your real OCR.space key
 
 # Initialize Bot
 sync_bot = telebot.TeleBot(TOKEN)
 
+# Made this global list dynamic
 STRATEGY_PAIRS = [
     "EURUSD", "GBPUSD", "USDJPY", "USDCAD", "USDCHF", "AUDUSD", "NZDUSD",
     "EURGBP", "EURJPY", "EURCAD", "EURAUD", "EURNZD", "EURCHF",
-    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD",
-    "AUDJPY", "NZDJPY", "CADJPY", "CHFJPY", "AUDCAD", "AUDNZD",
-    "USDZAR", "USDTRY", "USDINR", "USDMXN", "USDSGD", "USDHKD", "USDCNH"
+    "GBPJPY", "GBPAUD", "GBPCAD", "GBPCHF", "GBPNZD"
 ]
 
 last_alerts = {}
 alert_lock = threading.Lock()
+pairs_lock = threading.Lock()  # Lock to ensure thread safety when modifying the watchlist
+
+# --- HELPER LOGIC FOR DYNAMIC PAIR PARSING ---
+def clean_and_add_pairs(text_input):
+    """Parses text, extracts valid 6-character forex pairs, and updates the watchlist."""
+    import re
+    # Find all words that look like forex combinations (e.g., EURUSD, EUR/USD, GBP-USD)
+    potential_pairs = re.findall(r'[A-Za-z]{3}[/-]?[A-Za-z]{3}', text_input)
+    
+    added_pairs = []
+    with pairs_lock:
+        for p in potential_pairs:
+            cleaned = p.replace('/', '').replace('-', '').upper()
+            if len(cleaned) == 6 and cleaned not in STRATEGY_PAIRS:
+                STRATEGY_PAIRS.append(cleaned)
+                added_pairs.append(cleaned)
+    return added_pairs
 
 # --- NATIVE YFINANCE VELOCITY CHECKER ---
 def calculate_yfinance_velocity(series_m1):
     try:
         if series_m1 is None or len(series_m1) < 5:
             return "⚠️ UNCONFIRMED (Data Missing)"
-        
         recent_closes = series_m1.tail(5)
         volatility = recent_closes.max() - recent_closes.min()
-        
         return "🟢 SAFE (Active Liquidity)" if volatility > 0 else "⚠️ LOW VELOCITY (Stale Session)"
     except Exception:
         return "⚠️ UNCONFIRMED (Calculation Error)"
@@ -78,15 +93,12 @@ def get_yfinance_data(pair, interval):
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
         if df is None or df.empty: 
             return None
-        
-        # Robust flattening of multi-index data structures native to newer yfinance versions
         if isinstance(df.columns, pd.MultiIndex):
             if 'Close' in df.columns.get_level_values(0):
                 extracted = df.xs('Close', axis=1, level=0).squeeze()
                 return extracted if isinstance(extracted, pd.Series) else extracted.iloc[:, 0]
         elif 'Close' in df.columns:
             return df['Close'].squeeze()
-            
         return None
     except Exception as e:
         print(f"Data Fetch Error for {pair}: {e}")
@@ -123,7 +135,6 @@ def analyze_ticker(pair):
         if time.time() - last_alerts.get(alert_key, 0) < 300:
             return
 
-    # --- DYNAMIC ASSET STRUCTURING MATRIX ---
     is_jpy_pair = "JPY" in pair
     is_exotic_pair = any(exotic in pair for exotic in ["ZAR", "TRY", "INR", "MXN", "SGD", "HKD", "CNH"])
 
@@ -141,7 +152,6 @@ def analyze_ticker(pair):
     has_crossed_bearish = prev_m > prev_s and curr_m < curr_s
     is_shrinking = gap < prev_gap
 
-    # --- STRATEGY SIGNAL ROUTING ---
     triggered = False
     msg_to_send = ""
 
@@ -171,7 +181,6 @@ def analyze_ticker(pair):
         send_telegram_signal(msg_to_send)
 
 def responsive_sleep(seconds):
-    """Sleeps in short intervals to check if IS_RUNNING flag turns False instantly."""
     for _ in range(int(seconds)):
         if not IS_RUNNING:
             break
@@ -184,7 +193,11 @@ def strategy_loop():
         current_day = time.gmtime().tm_wday
         if current_day < 5: 
             if IS_RUNNING:
-                for pair in STRATEGY_PAIRS:
+                # We copy the list references safely before scanning to prevent threading iteration errors
+                with pairs_lock:
+                    current_watchlist = list(STRATEGY_PAIRS)
+                
+                for pair in current_watchlist:
                     if not IS_RUNNING: 
                         break
                     try:
@@ -218,24 +231,77 @@ def stop_bot_cmd(message):
 def status_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
     state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
-    sync_bot.reply_to(message, f"Strategy Scan Status: {state}")
+    sync_bot.reply_to(message, f"Strategy Scan Status: {state}\nTracking `{len(STRATEGY_PAIRS)}` tickers.")
+
+@sync_bot.message_handler(commands=['watchlist'])
+def view_watchlist_cmd(message):
+    if str(message.chat.id) != str(CHAT_ID): return
+    with pairs_lock:
+        pairs_string = ", ".join(STRATEGY_PAIRS)
+    sync_bot.reply_to(message, f"📋 *Active Watchlist ({len(STRATEGY_PAIRS)}):*\n`{pairs_string}`", parse_mode="Markdown")
+
+# Feature: Add pairs via custom text command (e.g. /add EURCAD, AUDNZD)
+@sync_bot.message_handler(commands=['add'])
+def add_pairs_text_cmd(message):
+    if str(message.chat.id) != str(CHAT_ID): return
+    raw_text = message.text.replace('/add', '')
+    if not raw_text.strip():
+        sync_bot.reply_to(message, "⚠️ Usage: `/add USDCAD, EURGBP`", parse_mode="Markdown")
+        return
+        
+    added = clean_and_add_pairs(raw_text)
+    if added:
+        sync_bot.reply_to(message, f"✅ Successfully added to scanning pool:\n`{', '.join(added)}`", parse_mode="Markdown")
+    else:
+        sync_bot.reply_to(message, "⚠️ No new or valid 6-letter asset pairs were detected.")
+
+# Feature: Add pairs via screenshot ingestion (OCR Engine)
+@sync_bot.message_handler(content_types=['photo'])
+def handle_image_watchlist(message):
+    if str(message.chat.id) != str(CHAT_ID): return
+    
+    sync_bot.reply_to(message, "⚡ Processing image layout. Scanning text for valid asset keys...")
+    try:
+        # Get image files details from Telegram cloud endpoints
+        file_info = sync_bot.get_file(message.photo[-1].file_id)
+        file_url = f"https://api.telegram.org/file/bot{TOKEN}/{file_info.file_path}"
+        
+        # Stream remote routing request straight into cloud OCR space platform
+        payload = {
+            'url': file_url,
+            'apikey': OCR_API_KEY,
+            'isOverlayRequired': False,
+            'scale': True
+        }
+        response = requests.post("https://api.ocr.space/parse/image", data=payload, timeout=15).json()
+        
+        if response.get("OCRExitCode") == 1:
+            parsed_text = response["ParsedResults"][0]["ParsedText"]
+            added = clean_and_add_pairs(parsed_text)
+            if added:
+                sync_bot.reply_to(message, f"🎉 OCR Extraction Success!\nAdded to strategy loop:\n`{', '.join(added)}`", parse_mode="Markdown")
+            else:
+                sync_bot.reply_to(message, f"🔍 Image read completed, but no *new* valid forex pairs found.\nText scanned:\n`{parsed_text}`", parse_mode="Markdown")
+        else:
+            sync_bot.reply_to(message, "❌ OCR failed to read text. Please ensure the chart symbols are clearly visible.")
+    except Exception as e:
+        sync_bot.reply_to(message, f"❌ Error reading image asset matrix: {e}")
 
 @sync_bot.message_handler(commands=['deploy'])
 def deploy_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
     if not DEPLOY_HOOK:
-        sync_bot.reply_to(message, "❌ Deploy hook missing from environment setup.")
+        sync_bot.reply_to(message, "❌ Deploy hook missing.")
         return
-        
     sync_bot.reply_to(message, "🔄 Triggering remote build architecture on Render...")
     try:
         response = requests.post(DEPLOY_HOOK, timeout=10)
         if response.status_code in [200, 204, 201]:
-            sync_bot.send_message(CHAT_ID, "🚀 Deploy command accepted! Render is now compiling your latest code.")
+            sync_bot.send_message(CHAT_ID, "🚀 Deploy command accepted!")
         else:
-            sync_bot.send_message(CHAT_ID, f"⚠️ Render server responded with status: {response.status_code}")
+            sync_bot.send_message(CHAT_ID, f"⚠️ Response code: {response.status_code}")
     except Exception as e:
-        sync_bot.send_message(CHAT_ID, f"❌ Failed to reach Render endpoint: {e}")
+        sync_bot.send_message(CHAT_ID, f"❌ Request error: {e}")
 
 # --- INIT AND RUN ---
 if __name__ == "__main__":
