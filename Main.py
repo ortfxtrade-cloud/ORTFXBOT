@@ -3,7 +3,7 @@ import time
 import threading
 from flask import Flask
 import telebot
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton  # 🚀 Added for button layouts
+from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
 import requests
 import yfinance as yf
 import pandas as pd
@@ -21,7 +21,7 @@ def run_web_server():
     port = int(os.environ.get("PORT", 8080))
     app.run(host='0.0.0.0', port=port)
 
-# --- CONFIGURATION FROM ENVIRONMENT (SECURE SETUP) ---
+# --- CONFIGURATION (PRIVATE REPOSITORY ONLY) ---
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAEkb4gEe5ruW8XMcj0Cntsu6VvZ1j_ZgnU")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
@@ -47,6 +47,7 @@ def load_watchlist_from_cloud():
         if "record" in response:
             with pairs_lock:
                 STRATEGY_PAIRS = list(response["record"])
+            print(f"Cloud watchlist loaded: {STRATEGY_PAIRS}")
     except Exception as e:
         print(f"Cloud Read Fail: {e}")
 
@@ -165,6 +166,7 @@ def analyze_ticker(pair):
             msg_to_send = f"🔥⬆️✅ *[BUY]* {pair}\nCross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVel: *{velocity}*"
             triggered = True
     elif 55 <= rsi <= 70:
+        # ✅ FIX: Removed the stray "Image" syntax typo from this line
         if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
             velocity = calculate_yfinance_velocity(close_m1)
             msg_to_send = f"🔍 *[GET READY]* {pair}\nConverging for SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVel: *{velocity}*"
@@ -199,7 +201,7 @@ def strategy_loop():
             else: time.sleep(2)
         else: time.sleep(60)
 
-# --- 🚀 NEW FEATURE: THE BUTTON CONTROL DASHBOARD ---
+# --- 🚀 THE BUTTON CONTROL DASHBOARD ---
 def generate_main_menu():
     markup = InlineKeyboardMarkup()
     markup.row(
@@ -231,31 +233,26 @@ def handle_menu_clicks(call):
     global IS_RUNNING
     if str(call.message.chat.id) != str(CHAT_ID): return
 
-    # 1. Status Button
     if call.data == "btn_status":
         state = "🟢 ACTIVE" if IS_RUNNING else "🔴 PAUSED"
         sync_bot.answer_callback_query(call.id, "Fetched system status!")
         sync_bot.send_message(call.message.chat.id, f"Strategy Scan Status: {state}\nTracking `{len(STRATEGY_PAIRS)}` tickers.")
 
-    # 2. Watchlist Button
     elif call.data == "btn_watchlist":
         with pairs_lock: pairs_string = ", ".join(STRATEGY_PAIRS)
         sync_bot.answer_callback_query(call.id)
         sync_bot.send_message(call.message.chat.id, f"📋 *Active Watchlist:* \n`{pairs_string}`\n\n💡 _To edit this list, send a handwritten note photo, or use:_ \n`/add PAIR` or `/remove PAIR`", parse_mode="Markdown")
 
-    # 3. Start Button
     elif call.data == "btn_start":
         IS_RUNNING = True
         sync_bot.answer_callback_query(call.id, "Scanner Activated!")
         sync_bot.send_message(call.message.chat.id, "🚀 Technical strategy matrix active. Scanning markets...")
 
-    # 4. Stop Button
     elif call.data == "btn_stop":
         IS_RUNNING = False
         sync_bot.answer_callback_query(call.id, "Scanner Paused!")
         sync_bot.send_message(call.message.chat.id, "🛑 Technical scans paused.")
 
-    # 5. Deploy Button
     elif call.data == "btn_deploy":
         sync_bot.answer_callback_query(call.id, "Sending hook...")
         sync_bot.send_message(call.message.chat.id, "🔄 Triggering remote build architecture on Render...")
@@ -268,7 +265,7 @@ def handle_menu_clicks(call):
         except Exception as e:
             sync_bot.send_message(call.message.chat.id, f"❌ Request error: {e}")
 
-# --- KEEPING RAW TEXT / TEXT OVERRIDES ALIVE ---
+# --- TEXT OVERRIDES ---
 @sync_bot.message_handler(commands=['add'])
 def add_pairs_text_cmd(message):
     if str(message.chat.id) != str(CHAT_ID): return
@@ -315,8 +312,21 @@ def handle_image_watchlist(message):
     except Exception as e:
         sync_bot.reply_to(message, f"❌ Error: {e}")
 
+# --- 🚀 RESTRUCTURED THREAD ARCHITECTURE FOR RENDER ---
 if __name__ == "__main__":
+    # 1. Fetch initial database structure
     load_watchlist_from_cloud()
-    threading.Thread(target=run_web_server, daemon=True).start()
+    
+    # 2. Run the technical scanning loop in a background thread
     threading.Thread(target=strategy_loop, daemon=True).start()
-    sync_bot.infinity_polling()
+    
+    # 3. Run the Telegram Listener in a background thread with safe connection timeout bounds
+    threading.Thread(
+        target=lambda: sync_bot.infinity_polling(timeout=20, long_polling_timeout=10), 
+        daemon=True
+    ).start()
+    
+    print("🚀 Background threads detached successfully. Activating Flask server engine...")
+    
+    # 4. Tie Flask directly to the main thread so Render stays synced to the application runtime
+    run_web_server()
