@@ -22,7 +22,7 @@ def run_web_server():
     app.run(host='0.0.0.0', port=port)
 
 # --- CONFIGURATION FROM ENVIRONMENT (SECURE SETUP) ---
-TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAFGUPCasmvUo3UFyHtyCljAgtfCbysn-08")
+TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAHrepO6aD5cRjQchyGJ05Oo7qNIQznlraw")
 CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "8701685996")
 DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc")
 OCR_API_KEY = os.environ.get("OCR_API_KEY", "K89169183488957") 
