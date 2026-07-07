@@ -110,6 +110,8 @@ def get_yfinance_data(pair, interval):
     try:
         df = yf.download(f"{pair}=X", period="2d", interval=interval, progress=False)
         if df is None or df.empty: return None
+        
+        # Safe MultiIndex / SingleIndex extraction patch
         if isinstance(df.columns, pd.MultiIndex):
             if 'Close' in df.columns.get_level_values(0):
                 extracted = df.xs('Close', axis=1, level=0).squeeze()
@@ -137,7 +139,9 @@ def analyze_ticker(pair):
     curr_s, prev_s = float(signal_m5.iloc[-1]), float(signal_m5.iloc[-2])
     gap = abs(curr_m - curr_s)
     prev_gap = abs(prev_m - prev_s)
-    m1_m, m1_s = float(macd_m1.iloc[-1]), float(macd_m1.iloc[-1])
+    
+    # FIX: Corrected macro m1 line parsing assignment variables
+    m1_m, m1_s = float(macd_m1.iloc[-1]), float(signal_m1.iloc[-1])
 
     alert_key = f"{pair}_alert"
     with alert_lock:
@@ -166,7 +170,6 @@ def analyze_ticker(pair):
             msg_to_send = f"🔥⬆️✅ *[BUY]* {pair}\nCross validated!\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVel: *{velocity}*"
             triggered = True
     elif 55 <= rsi <= 70:
-        # ✅ FIX: Removed the stray "Image" syntax typo from this line
         if is_shrinking and not has_crossed_bearish and gap <= PRE_ALERT_ZONE:
             velocity = calculate_yfinance_velocity(close_m1)
             msg_to_send = f"🔍 *[GET READY]* {pair}\nConverging for SELL.\nPrice: `{price:.5f}`\nRSI: `{rsi:.2f}`\nVel: *{velocity}*"
@@ -312,21 +315,17 @@ def handle_image_watchlist(message):
     except Exception as e:
         sync_bot.reply_to(message, f"❌ Error: {e}")
 
-# --- 🚀 RESTRUCTURED THREAD ARCHITECTURE FOR RENDER ---
+# --- 🚀 THREAD ARCHITECTURE ENGINE ---
 if __name__ == "__main__":
-    # 1. Fetch initial database structure
     load_watchlist_from_cloud()
     
-    # 2. Run the technical scanning loop in a background thread
+    # Detach the technical analytical processing loop to a background worker
     threading.Thread(target=strategy_loop, daemon=True).start()
     
-    # 3. Run the Telegram Listener in a background thread with safe connection timeout bounds
-    threading.Thread(
-        target=lambda: sync_bot.infinity_polling(timeout=20, long_polling_timeout=10), 
-        daemon=True
-    ).start()
+    # Detach the Flask health checking listener to an independent thread channel
+    print("🚀 Initializing Flask server engine on background channel...")
+    threading.Thread(target=run_web_server, daemon=True).start()
     
-    print("🚀 Background threads detached successfully. Activating Flask server engine...")
-    
-    # 4. Tie Flask directly to the main thread so Render stays synced to the application runtime
-    run_web_server()
+    # Force the core loop engine onto the primary execution vector to protect connection lifecycle
+    print("🔥 Attaching Telegram Infinity Polling to Main Thread. System Online!")
+    sync_bot.infinity_polling(timeout=20, long_polling_timeout=10)
