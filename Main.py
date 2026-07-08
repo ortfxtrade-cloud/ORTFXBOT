@@ -102,7 +102,7 @@ def sync_watchlist():
 # ==============================================================================
 # 2. CORE FUNCTIONS
 # ==============================================================================
-def calculate_macd(series, fast=12, slow=26, signal=9):
+calculate_macd(series, fast=12, slow=26, signal=9):
     ema_fast = series.ewm(span=fast, adjust=False).mean()
     ema_slow = series.ewm(span=slow, adjust=False).mean()
     macd_line = ema_fast - ema_slow
@@ -117,6 +117,7 @@ def calculate_rsi(series, periods=14):
     return 100 - (100 / (1 + rs))
 
 def fetch_and_clean_data(ticker, timeframe):
+    import yfinance as yf
     df = yf.download(tickers=ticker, period="2d", interval=timeframe, progress=False, group_by='ticker')
     if df.empty: return pd.DataFrame()
     if isinstance(df.columns, pd.MultiIndex):
@@ -125,7 +126,7 @@ def fetch_and_clean_data(ticker, timeframe):
 
 def scan_market_assets():
     global IS_RUNNING
-    logger.info("Adaptive Scanner (Spam-Filtered) initialized.")
+    logger.info("Adaptive Scanner (ATR-Dynamic) initialized.")
     while True:
         try:
             if not IS_RUNNING:
@@ -135,49 +136,52 @@ def scan_market_assets():
             with data_lock: pairs_to_scan = list(STRATEGY_PAIRS)
             for pair in pairs_to_scan:
                 df_5m = fetch_and_clean_data(pair, "5m")
-                if len(df_5m) < 40: continue
+                df_1m = fetch_and_clean_data(pair, "1m")
+                if len(df_5m) < 40 or len(df_1m) < 40: continue
 
-                # DYNAMIC ATR & SENSITIVITY
+                # DYNAMIC ATR (Self-calibrating volatility)
                 high_low = df_5m['High'] - df_5m['Low']
                 atr = high_low.rolling(window=14).mean().iloc[-1]
-                TOUCH_ZONE = atr * 0.15 
+                TOUCH_ZONE = atr * 0.5 
                 
+                # INDICATORS
                 macd_5m, signal_5m = calculate_macd(df_5m['Close'])
                 rsi_5m = calculate_rsi(df_5m['Close']).iloc[-1]
                 
-                # NOISE FILTERS
+                # NOISE FILTERS (Pulse & Compression)
                 last_5_gaps = [abs(macd_5m.iloc[i] - signal_5m.iloc[i]) for i in range(-5, 0)]
-                is_active_market = any(g > (atr * 0.05) for g in last_5_gaps)
+                is_compressed = all(g < (atr * 0.1) for g in last_5_gaps)
                 
                 curr_m, curr_s = macd_5m.iloc[-1], signal_5m.iloc[-1]
                 prev_m, prev_s = macd_5m.iloc[-2], signal_5m.iloc[-2]
                 
                 alert_type, alert_msg = None, ""
                 
-                if is_active_market:
+                if not is_compressed:
                     # BUY LOGIC
                     if 30 <= rsi_5m <= 45:
-                        if (prev_m < prev_s) and (curr_m >= curr_s):
+                        if (prev_m < prev_s) and (curr_m >= curr_s) and (calculate_macd(df_1m['Close'])[0].iloc[-1] > calculate_macd(df_1m['Close'])[1].iloc[-1]):
                             alert_type, alert_msg = "CONFIRMED_BUY", "🔥⬆️✅ *[BUY TRADE CONFIRMED]*\n"
-                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and abs(prev_m - prev_s) > TOUCH_ZONE:
+                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and (curr_m < curr_s):
                             alert_type, alert_msg = "PRE_BUY", "🔍 *[GET READY] BUY SETUP*\n"
-                    
                     # SELL LOGIC
                     elif 55 <= rsi_5m <= 70:
-                        if (prev_m > prev_s) and (curr_m <= curr_s):
+                        if (prev_m > prev_s) and (curr_m <= curr_s) and (calculate_macd(df_1m['Close'])[0].iloc[-1] < calculate_macd(df_1m['Close'])[1].iloc[-1]):
                             alert_type, alert_msg = "CONFIRMED_SELL", "📉⬇️✅ *[SELL TRADE CONFIRMED]*\n"
-                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and abs(prev_m - prev_s) > TOUCH_ZONE:
+                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and (curr_m > curr_s):
                             alert_type, alert_msg = "PRE_SELL", "🔍 *[GET READY] SELL SETUP*\n"
 
                 if alert_type:
                     key = f"{pair}_{alert_type}"
-                    if key not in last_alerts or (time.time() - last_alerts[key]) >= 600:
+                    if key not in last_alerts or (time.time() - last_alerts[key]) >= 300:
                         last_alerts[key] = time.time()
                         bot.send_message(CHAT_ID, f"{alert_msg}📌 *Asset:* {pair}\n💰 *Price:* {df_5m['Close'].iloc[-1]:.5f}")
             time.sleep(60)
         except Exception as e:
             logger.error(f"Scanner error: {e}")
             time.sleep(15)
+def is_unauthorized(message):
+    return str(message.chat.id) != str(CHAT_ID)
 
 # ==============================================================================
 # 4. INTERACTIVE TELEGRAM INTERACTION INTERFACES
