@@ -18,7 +18,7 @@ logger = logging.getLogger(__name__)
 # ==============================================================================
 # 1. ENVIRONMENT CONFIGURATION & DEFAULTS
 # ==============================================================================
-TELEGRAM_TOKEN =  "8686769653:AAEkb4gEe5ruW8XMcj0Cntsu6VvZ1j_ZgnU"
+TELEGRAM_TOKEN =  "8686769653:AAEfZANxprUBiZPs3gD3p9SLWO4tqdI1C34"
 CHAT_ID =  "8701685996"
 RENDER_DEPLOY_HOOK =  "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
 OCR_API_KEY = "K89169183488957"
