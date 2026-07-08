@@ -90,137 +90,8 @@ def sync_watchlist():
 # ==============================================================================
 # 3. MATHEMATICAL INDICATORS & CORE SIGNAL ENGINE
 # ==============================================================================
-def calculate_macd(series, fast=12, slow=26, signal=9):
-    ema_fast = series.ewm(span=fast, adjust=False).mean()
-    ema_slow = series.ewm(span=slow, adjust=False).mean()
-    macd_line = ema_fast - ema_slow
-    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
-    return macd_line, signal_line
 
-def calculate_rsi(series, periods=14):
-    delta = series.diff()
-    gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
-    loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
-    rs = gain / (loss + 1e-10)
-    return 100 - (100 / (1 + rs))
 
-def get_asset_boundaries(ticker_name, dynamic_price):
-    # Rule matching JPY, Exotic currencies, or price thresholds > 10 (e.g. Cryptos)
-    exotics = ["JPY", "ZAR", "TRY", "MXN", "INR", "SGD", "HKD", "CNH"]
-    is_exotic_or_jpy = any(exotic in ticker_name.upper() for exotic in exotics)
-    
-    if is_exotic_or_jpy or dynamic_price > 10:
-        return 0.08, 0.03  # PRE_ALERT_ZONE, DYNAMIC_THRESHOLD
-    else:
-        return 0.0008, 0.0003  # Standard Major boundaries
-
-def fetch_and_clean_data(ticker, timeframe):
-    import yfinance as yf
-    df = yf.download(tickers=ticker, period="2d", interval=timeframe, progress=False, group_by='ticker')
-    if df.empty:
-        return pd.DataFrame()
-        
-    # Standardize yfinance MultiIndex output columns if present
-    if isinstance(df.columns, pd.MultiIndex):
-        if ticker in df.columns.levels[0]:
-            df = df.xs(ticker, axis=1, level=0)
-        else:
-            df.columns = df.columns.get_level_values(-1)
-            
-    return df
-
-def scan_market_assets():
-    global IS_RUNNING
-    logger.info("Technical Analysis Market Scanner loop activated.")
-    
-    while True:
-        try:
-            if not IS_RUNNING:
-                time.sleep(5)
-                continue
-
-            # Weekend Check (Saturday = 5, Sunday = 6)
-            utc_now = datetime.datetime.now(datetime.timezone.utc)
-            if utc_now.weekday() in [5, 6]:
-                logger.info("Weekend detected. Scanner entering sleep mode (60s cooldown).")
-                time.sleep(60)
-                continue
-
-            with data_lock:
-                pairs_to_scan = list(STRATEGY_PAIRS)
-
-            for pair in pairs_to_scan:
-                # 1. Data Retrieval
-                df_5m = fetch_and_clean_data(pair, "5m")
-                df_1m = fetch_and_clean_data(pair, "1m")
-
-                if len(df_5m) < 40 or len(df_1m) < 40:
-                    logger.warning(f"Skipping {pair}: Insufficient data bars.")
-                    continue
-
-                # Get latest close price
-                current_price = float(df_5m['Close'].iloc[-1])
-
-                # 2. Extract Mathematical Boundaries
-                PRE_ALERT_ZONE, DYNAMIC_THRESHOLD = get_asset_boundaries(pair, current_price)
-
-                # 3. Micro Chart (1m) Indicators & Velocity
-                close_1m = df_1m['Close']
-                macd_1m, signal_1m = calculate_macd(close_1m)
-                current_macd_1m = macd_1m.iloc[-1]
-                current_signal_1m = signal_1m.iloc[-1]
-
-                last_5_close = close_1m.iloc[-5:]
-                velocity = "⚠️ STALE" if (last_5_close.max() - last_5_close.min()) == 0 else "🟢 SAFE"
-
-                # 4. Macro Chart (5m) Indicators
-                close_5m = df_5m['Close']
-                macd_5m, signal_5m = calculate_macd(close_5m)
-                rsi_5m = calculate_rsi(close_5m).iloc[-1]
-
-                current_macd_5m = macd_5m.iloc[-1]
-                current_signal_5m = signal_5m.iloc[-1]
-                prev_macd_5m = macd_5m.iloc[-2]
-                prev_signal_5m = signal_5m.iloc[-2]
-
-                gap = abs(current_macd_5m - current_signal_5m)
-                prev_gap = abs(prev_macd_5m - prev_signal_5m)
-                is_shrinking = gap < prev_gap
-
-                # 5. Signal Strategy Decision Matrix
-                alert_type = None
-                alert_msg = ""
-
-                # --- Oversold Setup (BUY Matrix) ---
-                if 30 <= rsi_5m <= 45:
-                    # Pre-Alert conditions
-                    if is_shrinking and (current_macd_5m < current_signal_5m) and (gap <= PRE_ALERT_ZONE):
-                        alert_type = "PRE_BUY"
-                        alert_msg = f"🔍 *[GET READY] BUY SETUP*\n"
-                    # Confirmed Signal conditions
-                    elif (gap >= DYNAMIC_THRESHOLD) and (prev_macd_5m < prev_signal_5m) and (current_macd_5m > current_signal_5m) and (current_macd_1m > current_signal_1m):
-                        alert_type = "CONFIRMED_BUY"
-                        alert_msg = f"🔥⬆️✅ *[BUY TRADE CONFIRMED]*\n"
-
-                # --- Overbought Setup (SELL Matrix) ---
-                elif 55 <= rsi_5m <= 70:
-                    # Pre-Alert conditions
-                    if is_shrinking and (current_macd_5m > current_signal_5m) and (gap <= PRE_ALERT_ZONE):
-                        alert_type = "PRE_SELL"
-                        alert_msg = f"🔍 *[GET READY] SELL SETUP*\n"
-                    # Confirmed Signal conditions
-                    elif (gap >= DYNAMIC_THRESHOLD) and (prev_macd_5m > prev_signal_5m) and (current_macd_5m < current_signal_5m) and (current_macd_1m < current_signal_1m):
-                        alert_type = "CONFIRMED_SELL"
-                        alert_msg = f"📉⬇️✅ *[SELL TRADE CONFIRMED]*\n"
-
-                # Dispatch Alert with Cooldown Guard Execution
-                if alert_type:
-                    unique_alert_key = f"{pair}_{alert_type}"
-                    now_ts = time.time()
-                    
-                    if unique_alert_key not in last_alerts or (now_ts - last_alerts[unique_alert_key]) >= 300:
-                        last_alerts[unique_alert_key] = now_ts
-                        
                         full_payload = (
                             f"{alert_msg}"
                             f"📌 *Asset:* {pair}\n"
@@ -246,6 +117,87 @@ def scan_market_assets():
 # ==============================================================================
 # 4. INTERACTIVE TELEGRAM INTERACTION INTERFACES
 # ==============================================================================
+# ==============================================================================
+# 3. MATHEMATICAL INDICATORS & CORE SIGNAL ENGINE
+# ==============================================================================
+def calculate_macd(series, fast=12, slow=26, signal=9):
+    ema_fast = series.ewm(span=fast, adjust=False).mean()
+    ema_slow = series.ewm(span=slow, adjust=False).mean()
+    macd_line = ema_fast - ema_slow
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
+def calculate_rsi(series, periods=14):
+    delta = series.diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=periods).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=periods).mean()
+    rs = gain / (loss + 1e-10)
+    return 100 - (100 / (1 + rs))
+
+def fetch_and_clean_data(ticker, timeframe):
+    import yfinance as yf
+    df = yf.download(tickers=ticker, period="2d", interval=timeframe, progress=False, group_by='ticker')
+    if df.empty: return pd.DataFrame()
+    if isinstance(df.columns, pd.MultiIndex):
+        df = df.xs(ticker, axis=1, level=0) if ticker in df.columns.levels[0] else df.copy()
+    return df
+
+def scan_market_assets():
+    global IS_RUNNING
+    logger.info("Adaptive Scanner (ATR-Dynamic) initialized.")
+    while True:
+        try:
+            if not IS_RUNNING:
+                time.sleep(5)
+                continue
+            
+            with data_lock: pairs_to_scan = list(STRATEGY_PAIRS)
+            for pair in pairs_to_scan:
+                df_5m = fetch_and_clean_data(pair, "5m")
+                df_1m = fetch_and_clean_data(pair, "1m")
+                if len(df_5m) < 40 or len(df_1m) < 40: continue
+
+                # DYNAMIC ATR (Self-calibrating volatility)
+                high_low = df_5m['High'] - df_5m['Low']
+                atr = high_low.rolling(window=14).mean().iloc[-1]
+                TOUCH_ZONE = atr * 0.5 
+                
+                # INDICATORS
+                macd_5m, signal_5m = calculate_macd(df_5m['Close'])
+                rsi_5m = calculate_rsi(df_5m['Close']).iloc[-1]
+                
+                # NOISE FILTERS (Pulse & Compression)
+                last_5_gaps = [abs(macd_5m.iloc[i] - signal_5m.iloc[i]) for i in range(-5, 0)]
+                is_compressed = all(g < (atr * 0.1) for g in last_5_gaps)
+                
+                curr_m, curr_s = macd_5m.iloc[-1], signal_5m.iloc[-1]
+                prev_m, prev_s = macd_5m.iloc[-2], signal_5m.iloc[-2]
+                
+                alert_type, alert_msg = None, ""
+                
+                if not is_compressed:
+                    # BUY LOGIC
+                    if 30 <= rsi_5m <= 45:
+                        if (prev_m < prev_s) and (curr_m >= curr_s) and (calculate_macd(df_1m['Close'])[0].iloc[-1] > calculate_macd(df_1m['Close'])[1].iloc[-1]):
+                            alert_type, alert_msg = "CONFIRMED_BUY", "🔥⬆️✅ *[BUY TRADE CONFIRMED]*\n"
+                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and (curr_m < curr_s):
+                            alert_type, alert_msg = "PRE_BUY", "🔍 *[GET READY] BUY SETUP*\n"
+                    # SELL LOGIC
+                    elif 55 <= rsi_5m <= 70:
+                        if (prev_m > prev_s) and (curr_m <= curr_s) and (calculate_macd(df_1m['Close'])[0].iloc[-1] < calculate_macd(df_1m['Close'])[1].iloc[-1]):
+                            alert_type, alert_msg = "CONFIRMED_SELL", "📉⬇️✅ *[SELL TRADE CONFIRMED]*\n"
+                        elif abs(curr_m - curr_s) <= TOUCH_ZONE and (curr_m > curr_s):
+                            alert_type, alert_msg = "PRE_SELL", "🔍 *[GET READY] SELL SETUP*\n"
+
+                if alert_type:
+                    key = f"{pair}_{alert_type}"
+                    if key not in last_alerts or (time.time() - last_alerts[key]) >= 300:
+                        last_alerts[key] = time.time()
+                        bot.send_message(CHAT_ID, f"{alert_msg}📌 *Asset:* {pair}\n💰 *Price:* {df_5m['Close'].iloc[-1]:.5f}")
+            time.sleep(60)
+        except Exception as e:
+            logger.error(f"Scanner error: {e}")
+            time.sleep(15)
 def is_unauthorized(message):
     return str(message.chat.id) != str(CHAT_ID)
 
