@@ -92,28 +92,6 @@ def sync_watchlist():
 # ==============================================================================
 
 
-                        full_payload = (
-                            f"{alert_msg}"
-                            f"📌 *Asset:* {pair}\n"
-                            f"💰 *Price:* {current_price:.5f}\n"
-                            f"📊 *5m RSI:* {rsi_5m:.2f}\n"
-                            f"📐 *Macro Gap:* {gap:.6f} / Boundary: {DYNAMIC_THRESHOLD}\n"
-                            f"⚡ *1m Velocity:* {velocity}\n"
-                            f"🕒 *Timestamp:* {utc_now.strftime('%H:%M:%S')} UTC"
-                        )
-                        try:
-                            bot.send_message(CHAT_ID, full_payload)
-                            logger.info(f"Alert transmitted to Chat ID for asset {pair} [{alert_type}].")
-                        except Exception as telegram_err:
-                            logger.error(f"Telegram alert delivery failure: {telegram_err}")
-
-            # Safe Throttling Guard
-            time.sleep(300)
-
-        except Exception as e:
-            logger.error(f"Fatal disruption in TA scanning engine thread execution loops: {e}", exc_info=True)
-            time.sleep(15) # Safety buffer padding to survive network dropped packets
-
 # ==============================================================================
 # 4. INTERACTIVE TELEGRAM INTERACTION INTERFACES
 # ==============================================================================
@@ -201,6 +179,9 @@ def scan_market_assets():
 def is_unauthorized(message):
     return str(message.chat.id) != str(CHAT_ID)
 
+# ==============================================================================
+# 4. INTERACTIVE TELEGRAM INTERACTION INTERFACES
+# ==============================================================================
 def generate_interactive_menu():
     markup = InlineKeyboardMarkup(row_width=2)
     markup.add(
