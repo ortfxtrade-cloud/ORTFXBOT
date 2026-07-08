@@ -21,12 +21,12 @@ logging.basicConfig(
 logger = logging.getLogger("TradingBot")
 
 # Secure retrieval of environment configurations with default fallbacks
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "YOUR_BOT_TOKEN")
-CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "YOUR_CHAT_ID")
-RENDER_DEPLOY_HOOK = os.environ.get("RENDER_DEPLOY_HOOK", "")
-OCR_API_KEY = os.environ.get("OCR_API_KEY", "helloworld")
-JSONBIN_KEY = os.environ.get("JSONBIN_KEY", "")
-JSONBIN_ID = os.environ.get("JSONBIN_ID", "")
+TELEGRAM_TOKEN =  "8686769653:AAEkb4gEe5ruW8XMcj0Cntsu6VvZ1j_ZgnU"
+CHAT_ID = "8701685996"
+RENDER_DEPLOY_HOOK = "https://api.render.com/deploy/srv-d8slig6gvqtc738d9rjg?key=oAz0lVAFCyc"
+OCR_API_KEY = "K89169183488957"
+JSONBIN_KEY =  "$2a$10$r5OJ.Ut/MaT2dYCZTZ4Im./0w3SvtdviC1c/IAWNNaMLmYGySb7T."
+JSONBIN_ID =  "6a4d4662f5f4af5e296dcd83"
 PORT = int(os.environ.get("PORT", 8080))
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="MARKDOWN")
