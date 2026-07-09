@@ -1,104 +1,104 @@
-import os
-import re
-import time
-import threading
-import logging
-import requests
-import telebot
-import yfinance as yf
-from flask import Flask
-from telebot.types import InlineKeyboardMarkup, InlineKeyboardButton
-
-# Configure structured logging
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] (%(threadName)s) %(message)s")
-logger = logging.getLogger(__name__)
+import os, re, time, threading, logging, telebot, yfinance as yf, json
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAFHxNO5l8Oe6_QIQiY1vqXKwaFeUDywFTE"
-CHAT_ID = "8701685996"
-OCR_API_KEY = "K89169183488957"
-JSONBIN_KEY = "$2a$10$r5OJ.Ut/MaT2dYCZTZ4Im./0w3SvtdviC1c/IAWNNaMLmYGySb7T."
-JSONBIN_ID = "6a4d4662f5f4af5e296dcd83"
-PORT = int(os.environ.get("PORT", 8080))
-
-data_lock = threading.Lock()
-STRATEGY_PAIRS = []
-IS_RUNNING = True
+TELEGRAM_TOKEN = "YOUR_TOKEN"
+CHAT_ID = "YOUR_CHAT_ID"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
-# --- Persistence & Logic ---
+# Global State
+data_lock = threading.Lock()
+STRATEGY_PAIRS = ["EURUSD=X"]
+IS_RUNNING = True
+alert_cooldowns = {}
+
+# --- Helper: Persistence ---
 def load_watchlist():
     global STRATEGY_PAIRS
-    res = requests.get(f"https://api.jsonbin.v3/b/{JSONBIN_ID}/latest", headers={"X-Master-Key": JSONBIN_KEY}, timeout=10)
-    if res.status_code == 200:
-        with data_lock: STRATEGY_PAIRS = list(res.json().get("record", {}).get("pairs", ["EURUSD=X"]))
+    # In a real scenario, fetch from your JSONbin here
+    pass 
 
-def sync_watchlist():
-    with data_lock: payload = {"pairs": STRATEGY_PAIRS}
-    requests.put(f"https://api.jsonbin.v3/b/{JSONBIN_ID}", json=payload, headers={"Content-Type": "application/json", "X-Master-Key": JSONBIN_KEY}, timeout=10)
+# --- Core Scanner Engine ---
+def calculate_strategy(df):
+    fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
+    slow_ema = df['Close'].ewm(span=26, adjust=False).mean()
+    macd = fast_ema - slow_ema
+    signal = macd.ewm(span=9, adjust=False).mean()
+    hist = macd - signal
+    delta = df['Close'].diff()
+    gain = (delta.where(delta > 0, 0)).rolling(window=14).mean()
+    loss = (-delta.where(delta < 0, 0)).rolling(window=14).mean()
+    rs = gain / loss
+    rsi = 100 - (100 / (1 + rs))
+    return macd, signal, hist, rsi, rsi.diff()
 
-def is_unauthorized(m): return str(m.chat.id) != str(CHAT_ID)
+def scanner_engine():
+    global alert_cooldowns
+    while True:
+        if IS_RUNNING:
+            with data_lock: current_pairs = list(STRATEGY_PAIRS)
+            for symbol in current_pairs:
+                try:
+                    df = yf.Ticker(symbol).history(period="1d", interval="1m")
+                    if len(df) < 50: continue
+                    m, s, h, rsi, vel = calculate_strategy(df)
+                    
+                    # Logic: Buy/Sell with Filters
+                    is_compressed = abs(h.iloc[-1]) < 0.0005
+                    is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
+                    is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
+                    
+                    if not is_compressed:
+                        if (is_bull or m.iloc[-1] > s.iloc[-1]) and (30 <= rsi.iloc[-1] <= 45) and vel.iloc[-1] > 0:
+                            if time.time() - alert_cooldowns.get(f"{symbol}_buy", 0) > 300:
+                                bot.send_message(CHAT_ID, f"🟢 *BUY* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
+                                alert_cooldowns[f"{symbol}_buy"] = time.time()
+                        elif (is_bear or m.iloc[-1] < s.iloc[-1]) and (55 <= rsi.iloc[-1] <= 70) and vel.iloc[-1] < 0:
+                            if time.time() - alert_cooldowns.get(f"{symbol}_sell", 0) > 300:
+                                bot.send_message(CHAT_ID, f"🔴 *SELL* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
+                                alert_cooldowns[f"{symbol}_sell"] = time.time()
+                except Exception as e: logging.error(f"Scanner Error: {e}")
+            time.sleep(60)
+        else: time.sleep(5)
 
-# --- Command Interface (Restored) ---
-def generate_interactive_menu():
-    markup = InlineKeyboardMarkup(row_width=2)
-    markup.add(InlineKeyboardButton("📊 Status", callback_data="btn_status"),
-               InlineKeyboardButton("📋 Watchlist", callback_data="btn_watchlist"))
-    markup.add(InlineKeyboardButton("🚀 Start", callback_data="btn_start"),
-               InlineKeyboardButton("🛑 Stop", callback_data="btn_stop"))
-    return markup
+# --- Telegram UI ---
+def get_kb():
+    kb = ReplyKeyboardMarkup(resize_keyboard=True)
+    kb.add(KeyboardButton("📊 Status"), KeyboardButton("📋 Watchlist"))
+    return kb
 
-@bot.message_handler(commands=['start', 'menu'])
-def handle_menu(m):
-    if is_unauthorized(m): return
-    bot.send_message(m.chat.id, "⚙️ *Engine Control Board*", reply_markup=generate_interactive_menu())
-
-@bot.callback_query_handler(func=lambda call: True)
-def handle_callbacks(call):
-    global IS_RUNNING
-    if call.data == "btn_status": bot.send_message(call.message.chat.id, f"State: {'🟢 RUNNING' if IS_RUNNING else '🛑 PAUSED'}")
-    elif call.data == "btn_watchlist": bot.send_message(call.message.chat.id, f"📋 Watchlist: `{', '.join(STRATEGY_PAIRS)}`")
-    elif call.data == "btn_start": IS_RUNNING = True; bot.answer_callback_query(call.id, "Scanning Activated")
-    elif call.data == "btn_stop": IS_RUNNING = False; bot.answer_callback_query(call.id, "Scanning Paused")
+@bot.message_handler(commands=['start'])
+def start(m):
+    if str(m.chat.id) == CHAT_ID:
+        bot.send_message(m.chat.id, "Engine Online.", reply_markup=get_kb())
 
 @bot.message_handler(commands=['add'])
 def add(m):
-    if is_unauthorized(m): return
+    if str(m.chat.id) != CHAT_ID: return
     syms = re.findall(r'[A-Z0-9=]{3,10}', m.text.upper())
-    with data_lock:
-        for s in syms:
-            if s != "ADD" and s not in STRATEGY_PAIRS: STRATEGY_PAIRS.append(s)
-    sync_watchlist()
-    bot.reply_to(m, f"✅ Added: {STRATEGY_PAIRS}")
+    for s in syms:
+        if s == "ADD": continue
+        # Simple Validation
+        ticker = yf.Ticker(s)
+        if len(ticker.history(period="1d")) > 0:
+            with data_lock:
+                if s not in STRATEGY_PAIRS: STRATEGY_PAIRS.append(s)
+    bot.reply_to(m, f"✅ Updated Watchlist: {STRATEGY_PAIRS}")
 
 @bot.message_handler(commands=['remove'])
 def remove(m):
-    if is_unauthorized(m): return
+    if str(m.chat.id) != CHAT_ID: return
     syms = re.findall(r'[A-Z0-9=]{3,10}', m.text.upper())
     with data_lock:
         for s in syms:
             if s in STRATEGY_PAIRS: STRATEGY_PAIRS.remove(s)
-    sync_watchlist()
     bot.reply_to(m, f"🗑️ Removed: {STRATEGY_PAIRS}")
 
-@bot.message_handler(content_types=['photo'])
-def handle_ocr(m):
-    if is_unauthorized(m): return
-    # OCR Logic
-    file_info = bot.get_file(m.photo[-1].file_id)
-    url = f"https://api.telegram.org/file/bot{TELEGRAM_TOKEN}/{file_info.file_path}"
-    res = requests.post("https://api.ocr.space/parse/image", data={'url': url, 'apikey': OCR_API_KEY}).json()
-    extracted = re.findall(r'\b[A-Z]{6}\b', res.get("ParsedResults", [{}])[0].get("ParsedText", "").upper())
-    with data_lock:
-        for s in [f"{sym}=X" for sym in extracted]:
-            if s not in STRATEGY_PAIRS: STRATEGY_PAIRS.append(s)
-    sync_watchlist()
-    bot.reply_to(m, f"🎯 OCR Added: {extracted}")
+@bot.message_handler(func=lambda m: m.text in ["📊 Status", "📋 Watchlist"])
+def handle_buttons(m):
+    if m.text == "📊 Status": bot.reply_to(m, f"State: {'🟢 RUNNING' if IS_RUNNING else '🛑 PAUSED'}")
+    else: bot.reply_to(m, f"Watchlist: {', '.join(STRATEGY_PAIRS)}")
 
-# --- Bootstrap ---
 if __name__ == "__main__":
-    try: bot.remove_webhook()
-    except: pass
-    load_watchlist()
-    # (Scanner thread and Flask app omitted for brevity, ensure they remain in your main file)
-    bot.infinity_polling(timeout=60, long_polling_timeout=60)
+    threading.Thread(target=scanner_engine, daemon=True).start()
+    bot.infinity_polling()
