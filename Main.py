@@ -2,7 +2,7 @@ import os, re, time, threading, logging, telebot, yfinance as yf, json
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "YOUR_TOKEN"
+TELEGRAM_TOKEN = "8686769653:AAFHxNO5l8Oe6_QIQiY1vqXKwaFeUDywFTE"
 CHAT_ID = "YOUR_CHAT_ID"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
