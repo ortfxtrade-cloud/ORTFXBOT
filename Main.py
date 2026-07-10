@@ -4,9 +4,8 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 # --- Configuration: Use Render Environment Variables ---
 # In Render, go to: Settings -> Environment -> Add
 # Add TELEGRAM_TOKEN and CHAT_ID here, do not hardcode them!
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-CHAT_ID = os.environ.get("CHAT_ID")
-
+TELEGRAM_TOKEN = "8686769653:AAFHxNO5l8Oe6_QIQiY1vqXKwaFeUDywFTE"
+CHAT_ID="8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # Global State
