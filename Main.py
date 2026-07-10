@@ -1,10 +1,12 @@
-import os, re, time, threading, logging, telebot, yfinance as yf, json
+import os, re, time, threading, logging, telebot, yfinance as yf
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAFHxNO5l8Oe6_QIQiY1vqXKwaFeUDywFTE"
-CHAT_ID = "8701685996"
-PORT = "8080"
+# --- Configuration: Use Render Environment Variables ---
+# In Render, go to: Settings -> Environment -> Add
+# Add TELEGRAM_TOKEN and CHAT_ID here, do not hardcode them!
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+CHAT_ID = os.environ.get("CHAT_ID")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # Global State
@@ -12,12 +14,6 @@ data_lock = threading.Lock()
 STRATEGY_PAIRS = ["EURUSD=X"]
 IS_RUNNING = True
 alert_cooldowns = {}
-
-# --- Helper: Persistence ---
-def load_watchlist():
-    global STRATEGY_PAIRS
-    # In a real scenario, fetch from your JSONbin here
-    pass 
 
 # --- Core Scanner Engine ---
 def calculate_strategy(df):
@@ -44,7 +40,6 @@ def scanner_engine():
                     if len(df) < 50: continue
                     m, s, h, rsi, vel = calculate_strategy(df)
                     
-                    # Logic: Buy/Sell with Filters
                     is_compressed = abs(h.iloc[-1]) < 0.0005
                     is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
                     is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
@@ -79,12 +74,11 @@ def add(m):
     syms = re.findall(r'[A-Z0-9=]{3,10}', m.text.upper())
     for s in syms:
         if s == "ADD": continue
-        # Simple Validation
         ticker = yf.Ticker(s)
         if len(ticker.history(period="1d")) > 0:
             with data_lock:
                 if s not in STRATEGY_PAIRS: STRATEGY_PAIRS.append(s)
-    bot.reply_to(m, f"✅ Updated Watchlist: {STRATEGY_PAIRS}")
+    bot.reply_to(m, f"✅ Updated Watchlist: {', '.join(STRATEGY_PAIRS)}")
 
 @bot.message_handler(commands=['remove'])
 def remove(m):
@@ -93,7 +87,7 @@ def remove(m):
     with data_lock:
         for s in syms:
             if s in STRATEGY_PAIRS: STRATEGY_PAIRS.remove(s)
-    bot.reply_to(m, f"🗑️ Removed: {STRATEGY_PAIRS}")
+    bot.reply_to(m, f"🗑️ Removed: {', '.join(STRATEGY_PAIRS)}")
 
 @bot.message_handler(func=lambda m: m.text in ["📊 Status", "📋 Watchlist"])
 def handle_buttons(m):
@@ -102,4 +96,5 @@ def handle_buttons(m):
 
 if __name__ == "__main__":
     threading.Thread(target=scanner_engine, daemon=True).start()
-    bot.infinity_polling()
+    # 'skip_pending=True' prevents the 409 Conflict error on restart
+    bot.infinity_polling(skip_pending=True)
