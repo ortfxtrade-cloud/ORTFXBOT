@@ -97,15 +97,13 @@ if __name__ == "__main__":
     # Start the background scanner thread
     threading.Thread(target=scanner_engine, daemon=True).start()
     
-    print("Bot is starting...")
+    print("Bot is starting with 60s timeout...")
     
-    # Use these specific settings to handle Render's restarts:
-    # 1. none_stop=True: Ensures the bot doesn't crash on minor API hiccups
-    # 2. skip_pending=True: (Keep this) to ignore old, unprocessed updates
-    # 3. If it still fails, remove skip_pending=True
-    try:
-        bot.infinity_polling(none_stop=True, skip_pending=True)
-    except Exception as e:
-        print(f"Polling failed, retrying... Error: {e}")
-        # Final fallback: retry without skip_pending if the first attempt conflicts
-        bot.infinity_polling(none_stop=True, skip_pending=False)
+    # 1. timeout=60: Tells Telegram to wait 60s before closing the idle connection.
+    # 2. long_polling_timeout=60: Allows the server to hold the request for 60s.
+    # 3. skip_pending=True: Immediately clears old messages to avoid 409 collisions.
+    bot.infinity_polling(
+        timeout=60, 
+        long_polling_timeout=60, 
+        skip_pending=True
+    )
