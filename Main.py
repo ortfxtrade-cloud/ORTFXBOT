@@ -94,6 +94,18 @@ def handle_buttons(m):
     else: bot.reply_to(m, f"Watchlist: {', '.join(STRATEGY_PAIRS)}")
 
 if __name__ == "__main__":
+    # Start the background scanner thread
     threading.Thread(target=scanner_engine, daemon=True).start()
-    # 'skip_pending=True' prevents the 409 Conflict error on restart
-    bot.infinity_polling(skip_pending=True)
+    
+    print("Bot is starting...")
+    
+    # Use these specific settings to handle Render's restarts:
+    # 1. none_stop=True: Ensures the bot doesn't crash on minor API hiccups
+    # 2. skip_pending=True: (Keep this) to ignore old, unprocessed updates
+    # 3. If it still fails, remove skip_pending=True
+    try:
+        bot.infinity_polling(none_stop=True, skip_pending=True)
+    except Exception as e:
+        print(f"Polling failed, retrying... Error: {e}")
+        # Final fallback: retry without skip_pending if the first attempt conflicts
+        bot.infinity_polling(none_stop=True, skip_pending=False)
