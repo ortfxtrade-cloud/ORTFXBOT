@@ -9,8 +9,8 @@ from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAG6iTE-m0f_mdXfiX5UOJ_9G2szLSDpMbg"
-CHAT_ID = "8701685996"
+TELEGRAM_TOKEN ="8686769653:AAHtda3UTFMxsW9MgnD-TTCa7qOKo7ypBms"
+CHAT_ID ="8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
 # Flask setup to satisfy Render's Web Service requirement
