@@ -74,11 +74,6 @@ def scanner_engine():
         else: 
             time.sleep(5)
 
- 
-                    
-                except Exception as e: logging.error(f"Scanner Error: {e}")
-            time.sleep(60)
-        else: time.sleep(5)
 
 # --- Telegram UI ---
 def get_kb():
