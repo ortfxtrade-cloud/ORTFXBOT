@@ -9,7 +9,7 @@ from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "8211995565:AAE7b59PtbFY-h40XmDW7tPtyY9ld6rOnao"
+TELEGRAM_TOKEN = "8686769653:AAG6iTE-m0f_mdXfiX5UOJ_9G2szLSDpMbg"
 CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
 
