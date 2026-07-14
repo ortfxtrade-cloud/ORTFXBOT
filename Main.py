@@ -1,18 +1,30 @@
-import os, re, time, threading, logging, telebot, yfinance as yf
+import os
+import re
+import time
+import threading
+import logging
+import telebot
+import yfinance as yf
+from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton
 
-# --- Configuration: Use Render Environment Variables ---
-# In Render, go to: Settings -> Environment -> Add
-# Add TELEGRAM_TOKEN and CHAT_ID here, do not hardcode them!
-TELEGRAM_TOKEN = "8686769653:AAFHxNO5l8Oe6_QIQiY1vqXKwaFeUDywFTE"
-CHAT_ID="8701685996"
+# --- Configuration ---
+TELEGRAM_TOKEN = "8211995565:AAE7b59PtbFY-h40XmDW7tPtyY9ld6rOnao"
+CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode="Markdown")
+
+# Flask setup to satisfy Render's Web Service requirement
+app = Flask(__name__)
 
 # Global State
 data_lock = threading.Lock()
 STRATEGY_PAIRS = ["EURUSD=X"]
 IS_RUNNING = True
 alert_cooldowns = {}
+
+@app.route('/')
+def health_check():
+    return "Bot is running!"
 
 # --- Core Scanner Engine ---
 def calculate_strategy(df):
@@ -37,14 +49,12 @@ def scanner_engine():
             
             for symbol in current_pairs:
                 try:
-                    df = yf.Ticker(symbol).history(period="5d", interval="5m") # Increased period for better average
+                    df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                         
                     m, s, h, rsi, vel = calculate_strategy(df)
                     
-                    # ADAPTIVE COMPRESSION:
-                    # Instead of 0.0005, we compare the current histogram 
-                    # to the average volatility of the last 20 periods.
+                    # ADAPTIVE COMPRESSION
                     recent_volatility = abs(h.tail(20)).mean()
                     is_compressed = abs(h.iloc[-1]) < (recent_volatility * 0.4) 
                     
@@ -73,7 +83,6 @@ def scanner_engine():
             time.sleep(60)
         else: 
             time.sleep(5)
-
 
 # --- Telegram UI ---
 def get_kb():
@@ -113,29 +122,23 @@ def handle_buttons(m):
     else: bot.reply_to(m, f"Watchlist: {', '.join(STRATEGY_PAIRS)}")
 
 if __name__ == "__main__":
-    # Start the background scanner thread
+    # Start scanner
     threading.Thread(target=scanner_engine, daemon=True).start()
     
-    print("Bot is starting with manual 30s polling...")
+    # Start web server on Render's assigned port (or 8080 locally)
+    port = int(os.environ.get("PORT", 8080))
+    threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
     
+    print(f"Bot and Web Server starting on port {port}...")
+    
+    # Telegram polling
     last_update_id = 0
     while True:
         try:
-            # Manually fetch updates from Telegram
-            # timeout=30 sets the long-polling duration to 30 seconds
-            updates = bot.get_updates(
-                offset=last_update_id + 1, 
-                timeout=30, 
-                limit=100
-            )
-            
+            updates = bot.get_updates(offset=last_update_id + 1, timeout=30, limit=100)
             for update in updates:
                 last_update_id = update.update_id
-                # Process the message through your existing handlers
                 bot.process_new_updates([update])
-                
         except Exception as e:
-            # Handle network drops or API errors gracefully
-            print(f"Polling error: {e}. Retrying in 5 seconds...")
+            print(f"Polling error: {e}. Retrying...")
             time.sleep(5)
-
