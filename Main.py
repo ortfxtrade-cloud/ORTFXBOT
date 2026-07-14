@@ -32,28 +32,48 @@ def scanner_engine():
     global alert_cooldowns
     while True:
         if IS_RUNNING:
-            with data_lock: current_pairs = list(STRATEGY_PAIRS)
+            with data_lock: 
+                current_pairs = list(STRATEGY_PAIRS)
+            
             for symbol in current_pairs:
                 try:
-                    df = yf.Ticker(symbol).history(period="1d", interval="1m")
+                    df = yf.Ticker(symbol).history(period="5d", interval="5m") # Increased period for better average
                     if len(df) < 50: continue
+                        
                     m, s, h, rsi, vel = calculate_strategy(df)
                     
-                    is_compressed = abs(h.iloc[-1]) < 0.0005
+                    # ADAPTIVE COMPRESSION:
+                    # Instead of 0.0005, we compare the current histogram 
+                    # to the average volatility of the last 20 periods.
+                    recent_volatility = abs(h.tail(20)).mean()
+                    is_compressed = abs(h.iloc[-1]) < (recent_volatility * 0.4) 
+                    
                     is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
                     is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
-                   # --- CHANGE THIS ---
-if not is_compressed:
-    # Remove "or m.iloc[-1] > s.iloc[-1]" and "or m.iloc[-1] < s.iloc[-1]"
-    if is_bull and (30 <= rsi.iloc[-1] <= 45) and vel.iloc[-1] > 0:
-        if time.time() - alert_cooldowns.get(f"{symbol}_buy", 0) > 300:
-            bot.send_message(CHAT_ID, f"🟢 *BUY* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
-            alert_cooldowns[f"{symbol}_buy"] = time.time()
+                    
+                    if not is_compressed:
+                        if (is_bull and 30 <= rsi.iloc[-1] <= 45) or (is_bear and 55 <= rsi.iloc[-1] <= 70):
+                            if time.time() - alert_cooldowns.get(f"{symbol}_last", 0) > 300:
+                                diff = m.iloc[-1] - s.iloc[-1]
+                                direction = "BUY" if is_bull else "SELL"
+                                icon = "🟢" if is_bull else "🔴"
+                                
+                                msg = (f"{icon} *{direction}* {symbol}\n"
+                                       f"MACD Cross: Confirmed (5m)\n"
+                                       f"MACD: {m.iloc[-1]:.5f} | Signal: {s.iloc[-1]:.5f}\n"
+                                       f"Diff: {diff:.5f}\n"
+                                       f"RSI: {rsi.iloc[-1]:.2f}\n"
+                                       f"Status: SAFE (Active Liquidity)")
+                                bot.send_message(CHAT_ID, msg)
+                                alert_cooldowns[f"{symbol}_last"] = time.time()
+                                
+                except Exception as e: 
+                    logging.error(f"Scanner Error for {symbol}: {e}")
             
-    elif is_bear and (55 <= rsi.iloc[-1] <= 70) and vel.iloc[-1] < 0:
-        if time.time() - alert_cooldowns.get(f"{symbol}_sell", 0) > 300:
-            bot.send_message(CHAT_ID, f"🔴 *SELL* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
-            alert_cooldowns[f"{symbol}_sell"] = time.time()
+            time.sleep(60)
+        else: 
+            time.sleep(5)
+
  
                     
                 except Exception as e: logging.error(f"Scanner Error: {e}")
