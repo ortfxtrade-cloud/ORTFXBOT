@@ -42,16 +42,20 @@ def scanner_engine():
                     is_compressed = abs(h.iloc[-1]) < 0.0005
                     is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
                     is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
+                   # --- CHANGE THIS ---
+if not is_compressed:
+    # Remove "or m.iloc[-1] > s.iloc[-1]" and "or m.iloc[-1] < s.iloc[-1]"
+    if is_bull and (30 <= rsi.iloc[-1] <= 45) and vel.iloc[-1] > 0:
+        if time.time() - alert_cooldowns.get(f"{symbol}_buy", 0) > 300:
+            bot.send_message(CHAT_ID, f"🟢 *BUY* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
+            alert_cooldowns[f"{symbol}_buy"] = time.time()
+            
+    elif is_bear and (55 <= rsi.iloc[-1] <= 70) and vel.iloc[-1] < 0:
+        if time.time() - alert_cooldowns.get(f"{symbol}_sell", 0) > 300:
+            bot.send_message(CHAT_ID, f"🔴 *SELL* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
+            alert_cooldowns[f"{symbol}_sell"] = time.time()
+ 
                     
-                    if not is_compressed:
-                        if (is_bull or m.iloc[-1] > s.iloc[-1]) and (30 <= rsi.iloc[-1] <= 45) and vel.iloc[-1] > 0:
-                            if time.time() - alert_cooldowns.get(f"{symbol}_buy", 0) > 300:
-                                bot.send_message(CHAT_ID, f"🟢 *BUY* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
-                                alert_cooldowns[f"{symbol}_buy"] = time.time()
-                        elif (is_bear or m.iloc[-1] < s.iloc[-1]) and (55 <= rsi.iloc[-1] <= 70) and vel.iloc[-1] < 0:
-                            if time.time() - alert_cooldowns.get(f"{symbol}_sell", 0) > 300:
-                                bot.send_message(CHAT_ID, f"🔴 *SELL* {symbol}\nRSI: {rsi.iloc[-1]:.2f} | Vel: {vel.iloc[-1]:.2f}")
-                                alert_cooldowns[f"{symbol}_sell"] = time.time()
                 except Exception as e: logging.error(f"Scanner Error: {e}")
             time.sleep(60)
         else: time.sleep(5)
