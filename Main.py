@@ -120,11 +120,6 @@ def remove(m):
 def handle_buttons(m):
     if m.text == "📊 Status": bot.reply_to(m, f"State: {'🟢 RUNNING' if IS_RUNNING else '🛑 PAUSED'}")
     else: bot.reply_to(m, f"Watchlist: {', '.join(STRATEGY_PAIRS)}")
-
-if __name__ == "__main__":
-    # Start scanner
-    threading.Thread(target=scanner_engine, daemon=True).start()
-    
     # Start web server on Render's assigned port (or 8080 locally)
     port = int(os.environ.get("PORT", 8080))
     threading.Thread(target=lambda: app.run(host="0.0.0.0", port=port), daemon=True).start()
