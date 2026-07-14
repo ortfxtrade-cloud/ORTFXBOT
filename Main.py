@@ -97,13 +97,26 @@ if __name__ == "__main__":
     # Start the background scanner thread
     threading.Thread(target=scanner_engine, daemon=True).start()
     
-    print("Bot is starting with 60s timeout...")
+    print("Bot is starting with manual 30s polling...")
     
-    # 1. timeout=60: Tells Telegram to wait 60s before closing the idle connection.
-    # 2. long_polling_timeout=60: Allows the server to hold the request for 60s.
-    # 3. skip_pending=True: Immediately clears old messages to avoid 409 collisions.
-    bot.infinity_polling(
-        timeout=60, 
-        long_polling_timeout=60, 
-        skip_pending=True
-    )
+    last_update_id = 0
+    while True:
+        try:
+            # Manually fetch updates from Telegram
+            # timeout=30 sets the long-polling duration to 30 seconds
+            updates = bot.get_updates(
+                offset=last_update_id + 1, 
+                timeout=30, 
+                limit=100
+            )
+            
+            for update in updates:
+                last_update_id = update.update_id
+                # Process the message through your existing handlers
+                bot.process_new_updates([update])
+                
+        except Exception as e:
+            # Handle network drops or API errors gracefully
+            print(f"Polling error: {e}. Retrying in 5 seconds...")
+            time.sleep(5)
+
