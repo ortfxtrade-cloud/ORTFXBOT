@@ -10,8 +10,8 @@ from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAHtda3UTFMxsW9MgnD-TTCa7qOKo7ypBms")
-CHAT_ID = os.environ.get("CHAT_ID", "8701685996")
+TELEGRAM_TOKEN = "8686769653:AAEUvYlVgCAv9Rn1jL82aNl6wTxk1-w7g3Q"
+CHAT_ID =  "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
 # Flask setup
