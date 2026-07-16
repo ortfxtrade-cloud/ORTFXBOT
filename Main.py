@@ -286,17 +286,17 @@ def handle_callback(call):
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 bot.edit_message_text("📭 No pairs left.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
-        
+        (call.id, "⏸️ Scanner paused!")
         # Start scanner
-        elif data == "start_scanner":
-             STATE = {"running": True}
-            bot.answer_callback_query(call.id, "✅ Scanner started!")
-        
-        # Pause scanner
-        elif data == "pause_scanner":
-            IS_RUNNING = False
+       elif data == "start_scanner":
+            STATE["running"] = True
+             bot.answer_callback_query(call.id, "✅ Scanner started!")
+
+         # Pause scanner
+       elif data == "pause_scanner":
+            STATE["running"] = False
             bot.answer_callback_query(call.id, "⏸️ Scanner paused!")
-        
+
         # Quick scan
         elif data == "quick_scan":
             with data_lock:
