@@ -14,7 +14,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "8686769653:AAHtda3UTFMxsW9Mgn
 CHAT_ID = os.environ.get("CHAT_ID", "8701685996")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
-# Flask setup to satisfy Render's Web Service requirement
+# Flask setup
 app = Flask(__name__)
 
 # Global State
@@ -27,7 +27,7 @@ STRATEGY_PAIRS = [
     "AUDJPY=X", "NZDJPY=X", "AUDNZD=X", "AUDCAD=X", "AUDCHF=X",
     "NZDCAD=X", "NZDCHF=X", "CADCHF=X",
 ]
-IS_RUNNING = True
+STATE = {"running": True}
 alert_cooldowns = {}
 
 logging.basicConfig(level=logging.INFO)
@@ -38,7 +38,6 @@ def health_check():
 
 # --- Inline Keyboards ---
 def get_main_menu():
-    """Main inline menu"""
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📊 Status", callback_data="status"),
@@ -53,23 +52,18 @@ def get_main_menu():
     return kb
 
 def get_pairs_keyboard(pairs, action="info", page=0, per_page=10):
-    """Paginated pairs keyboard for watchlist/remove"""
     kb = InlineKeyboardMarkup(row_width=2)
-    
-    # Paginate
     total_pages = (len(pairs) + per_page - 1) // per_page
     start = page * per_page
     end = start + per_page
     page_pairs = pairs[start:end]
     
-    # Add pair buttons
     for pair in page_pairs:
         if action == "info":
             kb.add(InlineKeyboardButton(f"📌 {pair}", callback_data=f"info_{pair}"))
         elif action == "remove":
             kb.add(InlineKeyboardButton(f"❌ {pair}", callback_data=f"remove_{pair}"))
     
-    # Navigation row
     nav_row = []
     if page > 0:
         nav_row.append(InlineKeyboardButton("⬅️ Prev", callback_data=f"page_{action}_{page-1}"))
@@ -82,7 +76,6 @@ def get_pairs_keyboard(pairs, action="info", page=0, per_page=10):
     return kb
 
 def get_add_suggestions():
-    """Suggest popular pairs to add"""
     kb = InlineKeyboardMarkup(row_width=3)
     popular = [
         "EURUSD=X", "GBPUSD=X", "USDJPY=X", "BTC-USD", "ETH-USD",
@@ -133,7 +126,6 @@ def calculate_strategy(df):
     return macd, signal, hist, rsi
 
 def quick_scan_single(symbol):
-    """Quick scan for inline button response"""
     try:
         df = yf.Ticker(symbol).history(period="5d", interval="5m")
         if len(df) < 50:
@@ -170,7 +162,7 @@ def quick_scan_single(symbol):
 def scanner_engine():
     global alert_cooldowns
     while True:
-        if IS_RUNNING:
+        if STATE["running"]:
             with data_lock:
                 current_pairs = list(STRATEGY_PAIRS)
 
@@ -231,7 +223,7 @@ def handle_callback(call):
         
         # Status
         elif data == "status":
-            status_text = f"🟢 Scanner: {'RUNNING' if IS_RUNNING else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}"
+            status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}"
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
@@ -278,7 +270,6 @@ def handle_callback(call):
                 if pair in STRATEGY_PAIRS:
                     STRATEGY_PAIRS.remove(pair)
             bot.answer_callback_query(call.id, f"🗑️ {pair} removed!")
-            # Refresh remove menu
             with data_lock:
                 pairs = list(STRATEGY_PAIRS)
             kb = get_pairs_keyboard(pairs, "remove", 0) if pairs else None
@@ -286,21 +277,21 @@ def handle_callback(call):
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 bot.edit_message_text("📭 No pairs left.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
-        (call.id, "⏸️ Scanner paused!")
+        
         # Start scanner
-       elif data == "start_scanner":
+        elif data == "start_scanner":
             STATE["running"] = True
-             bot.answer_callback_query(call.id, "✅ Scanner started!")
+            bot.answer_callback_query(call.id, "✅ Scanner started!")
 
-         # Pause scanner
-       elif data == "pause_scanner":
+        # Pause scanner
+        elif data == "pause_scanner":
             STATE["running"] = False
             bot.answer_callback_query(call.id, "⏸️ Scanner paused!")
-
+        
         # Quick scan
         elif data == "quick_scan":
             with data_lock:
-                pairs = list(STRATEGY_PAIRS[:5])  # First 5 pairs
+                pairs = list(STRATEGY_PAIRS[:5])
             bot.edit_message_text("🔍 *Quick scanning...*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
             results = []
             for pair in pairs:
@@ -339,7 +330,7 @@ def handle_callback(call):
         # Mute pair
         elif data.startswith("mute_"):
             pair = data.replace("mute_", "")
-            alert_cooldowns[pair] = time.time() + 1800  # Mute for 30 min
+            alert_cooldowns[pair] = time.time() + 1800
             bot.answer_callback_query(call.id, f"🔕 {pair} muted for 30 min")
         
         # Info on specific pair
@@ -391,11 +382,6 @@ def handle_callback(call):
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
 
 # --- Command Handlers ---
-def get_kb():
-    kb = ReplyKeyboardMarkup(resize_keyboard=True)
-    kb.add(KeyboardButton("📊 Status"), KeyboardButton("📋 Watchlist"))
-    return kb
-
 @bot.message_handler(commands=['start'])
 def start(m):
     if str(m.chat.id) == CHAT_ID:
@@ -450,7 +436,7 @@ def remove(m):
 @bot.message_handler(func=lambda m: m.text in ["📊 Status", "📋 Watchlist"])
 def handle_buttons(m):
     if m.text == "📊 Status":
-        bot.reply_to(m, f"🟢 Scanner: {'RUNNING' if IS_RUNNING else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}", reply_markup=get_main_menu())
+        bot.reply_to(m, f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}", reply_markup=get_main_menu())
     else:
         with data_lock:
             pairs = list(STRATEGY_PAIRS)
