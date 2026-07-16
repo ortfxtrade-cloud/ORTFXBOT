@@ -289,8 +289,7 @@ def handle_callback(call):
         
         # Start scanner
         elif data == "start_scanner":
-            global IS_RUNNING
-            IS_RUNNING = True
+             STATE = {"running": True}
             bot.answer_callback_query(call.id, "✅ Scanner started!")
         
         # Pause scanner
