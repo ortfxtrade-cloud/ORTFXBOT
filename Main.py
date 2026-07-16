@@ -135,9 +135,11 @@ def quick_scan_single(symbol):
         recent_volatility = abs(h.tail(20)).mean()
         is_compressed = abs(h.iloc[-1]) < (recent_volatility * 0.4)
         
-        is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
-        is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
-        
+        is_bull = ((m.iloc[-3] <= s.iloc[-3]) and (m.iloc[-2] > s.iloc[-2])) or \
+          ((m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1]))
+          
+        is_bear = ((m.iloc[-3] >= s.iloc[-3]) and (m.iloc[-2] < s.iloc[-2])) or \
+          ((m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1]))
         result = {
             "symbol": symbol,
             "macd": m.iloc[-1],
