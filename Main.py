@@ -29,6 +29,7 @@ STRATEGY_PAIRS = [
 ]
 STATE = {"running": True}
 alert_cooldowns = {}
+spread_blocked = {}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -42,6 +43,7 @@ def get_main_menu():
     kb.add(
         InlineKeyboardButton("📊 Status", callback_data="status"),
         InlineKeyboardButton("📋 Watchlist", callback_data="watchlist"),
+        InlineKeyboardButton("🚫 Blocked", callback_data="blocked_list"),
         InlineKeyboardButton("▶️ Start Scanner", callback_data="start_scanner"),
         InlineKeyboardButton("⏸️ Pause Scanner", callback_data="pause_scanner"),
         InlineKeyboardButton("➕ Add Pair", callback_data="add_menu"),
@@ -86,6 +88,37 @@ def get_add_suggestions():
     kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
     return kb
 
+# --- Spread Detection (5-Minute Timeframe) ---
+def is_spread_present(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1d", interval="5m")
+        
+        if len(df) < 10:
+            return False
+        
+        last_candles = df.tail(5)
+        high_low_range = last_candles['High'] - last_candles['Low']
+        avg_range = high_low_range.mean()
+        avg_price = last_candles['Close'].mean()
+        body_size = abs(last_candles['Close'] - last_candles['Open'])
+        avg_body = body_size.mean()
+        
+        condition1 = avg_price > 0 and avg_range < avg_price * 0.0002
+        condition2 = avg_price > 0 and avg_body < avg_price * 0.00005
+        condition3 = df.iloc[-1]['High'] == df.iloc[-1]['Low']
+        
+        conditions_met = sum([condition1, condition2, condition3])
+        
+        if conditions_met >= 2:
+            return True
+        
+        return False
+        
+    except Exception as e:
+        logging.error(f"Spread check error for {symbol}: {e}")
+        return False
+
 # --- Core Scanner Engine ---
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
@@ -111,13 +144,19 @@ def quick_scan_single(symbol):
         prev_diff = m.iloc[-1] - s.iloc[-1]
         prev_diff_before = m.iloc[-2] - s.iloc[-2]
         
-        # Get 1m data
         df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
         m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
         diff_1m_now = m_1m.iloc[-1] - s_1m.iloc[-1]
         
-        is_bull = (prev_diff_before < 0) and (prev_diff > 0)
-        is_bear = (prev_diff_before > 0) and (prev_diff < 0)
+        # Dynamic gap for quick scan
+        recent_1m_diffs = abs(m_1m.tail(20) - s_1m.tail(20))
+        avg_1m_diff = recent_1m_diffs.mean()
+        min_gap = max(avg_1m_diff * 0.15, 0.0000001)
+        
+        is_1m_strong = diff_1m_now > min_gap if diff_1m_now > 0 else diff_1m_now < -min_gap
+        
+        is_bull = (prev_diff_before < 0) and (prev_diff > 0) and is_1m_strong
+        is_bear = (prev_diff_before > 0) and (prev_diff < 0) and is_1m_strong
         
         result = {
             "symbol": symbol,
@@ -128,6 +167,7 @@ def quick_scan_single(symbol):
             "signal_1m": s_1m.iloc[-1],
             "diff_1m": diff_1m_now,
             "rsi_5m": rsi.iloc[-1],
+            "min_gap": min_gap,
         }
         
         if is_bull and 30 <= rsi.iloc[-1] <= 45:
@@ -140,7 +180,7 @@ def quick_scan_single(symbol):
         return None, str(e)
 
 def scanner_engine():
-    global alert_cooldowns
+    global alert_cooldowns, spread_blocked
     while True:
         if STATE["running"]:
             with data_lock:
@@ -150,6 +190,30 @@ def scanner_engine():
 
             for symbol in current_pairs:
                 try:
+                    # ============ SPREAD FILTER (5-MINUTE CHECK) ============
+                    if symbol in spread_blocked:
+                        block_end_time = spread_blocked[symbol]
+                        if time.time() < block_end_time:
+                            continue
+                        else:
+                            del spread_blocked[symbol]
+                            spread_msg = f"✅ *SPREAD OVER* {symbol}\nSignals resumed after 1 hour"
+                            try:
+                                bot.send_message(CHAT_ID, spread_msg, parse_mode="Markdown")
+                            except:
+                                bot.send_message(CHAT_ID, spread_msg, parse_mode=None)
+                    
+                    if is_spread_present(symbol):
+                        if symbol not in spread_blocked:
+                            spread_blocked[symbol] = time.time() + 3600
+                            spread_msg = f"🚫 *SPREAD DETECTED* {symbol}\nSignals blocked for 1 hour"
+                            try:
+                                bot.send_message(CHAT_ID, spread_msg, parse_mode="Markdown")
+                            except:
+                                bot.send_message(CHAT_ID, spread_msg, parse_mode=None)
+                        continue
+                    # =========================================================
+                    
                     # 5-minute data
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50:
@@ -157,7 +221,6 @@ def scanner_engine():
 
                     m, s, h, rsi = calculate_strategy(df)
 
-                    # Calculate 5-minute diffs
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
@@ -167,18 +230,20 @@ def scanner_engine():
                         continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
 
-                    # 1-minute MACD current state
+                    # Dynamic 1-minute gap filter
                     diff_1m_now = m_1m.iloc[-1] - s_1m.iloc[-1]
-
-                    # 1-minute direction
-                    is_1m_bullish = diff_1m_now > 0
-                    is_1m_bearish = diff_1m_now < 0
+                    recent_1m_diffs = abs(m_1m.tail(20) - s_1m.tail(20))
+                    avg_1m_diff = recent_1m_diffs.mean()
+                    min_gap = max(avg_1m_diff * 0.15, 0.0000001)
+                    
+                    is_1m_bullish = diff_1m_now > min_gap
+                    is_1m_bearish = diff_1m_now < -min_gap
 
                     # 5-minute signals
                     pre_bull = (prev_diff_before < 0) and (prev_diff > 0) and (30 <= rsi.iloc[-1] <= 45)
                     pre_bear = (prev_diff_before > 0) and (prev_diff < 0) and (55 <= rsi.iloc[-1] <= 70)
 
-                    # PRE-ALERT: 5m sign change + 1m agrees
+                    # PRE-ALERT: 5m sign change + 1m agrees with gap
                     alert_bull = pre_bull and is_1m_bullish
                     alert_bear = pre_bear and is_1m_bearish
 
@@ -196,6 +261,7 @@ def scanner_engine():
                                 f"✅ 5m & 1m Both Agree!\n\n"
                                 f"5m Diff: {prev_diff_before:.5f} → {prev_diff:.5f}\n"
                                 f"1m Diff: {diff_1m_now:.5f}\n"
+                                f"1m Min Gap: {min_gap:.8f}\n"
                                 f"5m RSI: {rsi.iloc[-1]:.2f}\n\n"
                                 f"Waiting for candle close..."
                             )
@@ -218,6 +284,7 @@ def scanner_engine():
                                 f"5m Diff: {prev_diff:.5f}\n"
                                 f"1m MACD: {m_1m.iloc[-1]:.5f} | Signal: {s_1m.iloc[-1]:.5f}\n"
                                 f"1m Diff: {diff_1m_now:.5f}\n"
+                                f"1m Min Gap: {min_gap:.8f}\n"
                                 f"5m RSI: {rsi.iloc[-1]:.2f}\n\n"
                                 f"Status: SAFE (Active Liquidity)"
                             )
@@ -265,10 +332,31 @@ def handle_callback(call):
             )
 
         elif data == "status":
-            status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}"
+            blocked_count = len(spread_blocked)
+            status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}"
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+        elif data == "blocked_list":
+            if not spread_blocked:
+                msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+                bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            else:
+                msg = "🚫 *Blocked Pairs:*\n\n"
+                now = time.time()
+                for symbol, end_time in spread_blocked.items():
+                    remaining = int((end_time - now) / 60)
+                    if remaining > 0:
+                        msg += f"• {symbol} — {remaining} min remaining\n"
+                    else:
+                        msg += f"• {symbol} — Expiring soon\n"
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="blocked_list"))
+                kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+                bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
 
         elif data == "watchlist" or data.startswith("page_info_"):
             page = int(data.split("_")[-1]) if data.startswith("page_info_") else 0
@@ -352,6 +440,7 @@ def handle_callback(call):
                     f"5m Diff: {result['diff_5m']:.5f}\n"
                     f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                     f"1m Diff: {result['diff_1m']:.5f}\n"
+                    f"1m Min Gap: {result['min_gap']:.8f}\n"
                     f"5m RSI: {result['rsi_5m']:.2f}\n"
                     f"Signal: {direction}"
                 )
@@ -378,6 +467,7 @@ def handle_callback(call):
                     f"5m Diff: {result['diff_5m']:.5f}\n"
                     f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                     f"1m Diff: {result['diff_1m']:.5f}\n"
+                    f"1m Min Gap: {result['min_gap']:.8f}\n"
                     f"5m RSI: {result['rsi_5m']:.2f}\n"
                     f"Signal: {direction}"
                 )
@@ -394,8 +484,11 @@ def handle_callback(call):
             help_text = (
                 "🤖 *Forex Scanner Bot*\n\n"
                 "*Alerts:*\n"
-                "⚠️ Pre-Alert: Sign change + 1m agrees\n"
+                "⚠️ Pre-Alert: 5m sign change + 1m gap\n"
                 "🟢/🔴 Confirmed: Candle closed + gap\n\n"
+                "*Filters:*\n"
+                "🚫 Spread: 5m check, 1 hour block\n"
+                "📏 1m Gap: Dynamic per pair (15% of avg)\n\n"
                 "*Strategy:* MACD Crossover + RSI Filter\n"
                 "*BUY:* Diff - → + | RSI 30-45\n"
                 "*SELL:* Diff + → - | RSI 55-70\n\n"
@@ -423,8 +516,10 @@ def start(m):
         bot.send_message(
             m.chat.id,
             "🚀 *Forex Scanner Online*\n\n"
-            "⚠️ Pre-Alert: Sign change + 1m agrees\n"
-            "🟢/🔴 Confirmed: Candle closed + gap\n\n"
+            "⚠️ Pre-Alert: 5m sign change + 1m gap\n"
+            "🟢/🔴 Confirmed: Candle closed + gap\n"
+            "🚫 Spread Filter: 5m check, 1 hour block\n"
+            "📏 1m Gap Filter: Dynamic per pair\n\n"
             "Select an option:",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
@@ -474,7 +569,8 @@ def remove(m):
 @bot.message_handler(func=lambda m: m.text in ["📊 Status", "📋 Watchlist"])
 def handle_buttons(m):
     if m.text == "📊 Status":
-        bot.reply_to(m, f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}", reply_markup=get_main_menu())
+        blocked_count = len(spread_blocked)
+        bot.reply_to(m, f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}", reply_markup=get_main_menu())
     else:
         with data_lock:
             pairs = list(STRATEGY_PAIRS)
@@ -484,10 +580,7 @@ def handle_buttons(m):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
 
-    # Start scanner in daemon thread
     threading.Thread(target=scanner_engine, daemon=True).start()
-
-    # Start bot polling in daemon thread
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
 
     print(f"Bot and Web Server starting on port {port}...")
