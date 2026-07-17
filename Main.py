@@ -11,7 +11,7 @@ from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMar
 
 # --- Configuration ---
 TELEGRAM_TOKEN = "8686769653:AAEUvYlVgCAv9Rn1jL82aNl6wTxk1-w7g3Q"
-CHAT_ID =  "8701685996"
+CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
 # Flask setup
@@ -86,30 +86,6 @@ def get_add_suggestions():
     kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
     return kb
 
-# --- Alert with Inline Buttons ---
-def send_alert(direction, symbol, macd_val, signal_val, diff_val, rsi_val):
-    icon = "🟢" if direction == "BUY" else "🔴"
-    msg = (
-        f"{icon} *{direction}* {symbol}\n"
-        f"MACD Cross: Confirmed (5m)\n"
-        f"MACD: {macd_val:.5f} | Signal: {signal_val:.5f}\n"
-        f"Diff: {diff_val:.5f}\n"
-        f"RSI: {rsi_val:.2f}\n"
-        f"Status: SAFE (Active Liquidity)"
-    )
-    
-    kb = InlineKeyboardMarkup(row_width=2)
-    kb.add(
-        InlineKeyboardButton(f"📊 Quick Scan {symbol}", callback_data=f"quick_{symbol}"),
-        InlineKeyboardButton("🔕 Mute 30min", callback_data=f"mute_{symbol}"),
-        InlineKeyboardButton("❌ Remove Pair", callback_data=f"remove_{symbol}"),
-    )
-    
-    try:
-        bot.send_message(CHAT_ID, msg, reply_markup=kb, parse_mode="Markdown")
-    except:
-        bot.send_message(CHAT_ID, msg, reply_markup=kb, parse_mode=None)
-
 # --- Core Scanner Engine ---
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
@@ -132,30 +108,32 @@ def quick_scan_single(symbol):
             return None, "Insufficient data"
         
         m, s, h, rsi = calculate_strategy(df)
-        recent_volatility = abs(h.tail(20)).mean()
-        is_compressed = abs(h.iloc[-1]) < (recent_volatility * 0.4)
+        prev_diff = m.iloc[-1] - s.iloc[-1]
+        prev_diff_before = m.iloc[-2] - s.iloc[-2]
         
-        is_bull = ((m.iloc[-3] <= s.iloc[-3]) and (m.iloc[-2] > s.iloc[-2])) or \
-          ((m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1]))
-          
-        is_bear = ((m.iloc[-3] >= s.iloc[-3]) and (m.iloc[-2] < s.iloc[-2])) or \
-          ((m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1]))
+        # Get 1m data
+        df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
+        m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
+        diff_1m_now = m_1m.iloc[-1] - s_1m.iloc[-1]
+        
+        is_bull = (prev_diff_before < 0) and (prev_diff > 0)
+        is_bear = (prev_diff_before > 0) and (prev_diff < 0)
+        
         result = {
             "symbol": symbol,
-            "macd": m.iloc[-1],
-            "signal": s.iloc[-1],
-            "diff": m.iloc[-1] - s.iloc[-1],
-            "rsi": rsi.iloc[-1],
-            "is_compressed": is_compressed,
-            "is_bull": is_bull,
-            "is_bear": is_bear,
+            "macd_5m": m.iloc[-1],
+            "signal_5m": s.iloc[-1],
+            "diff_5m": prev_diff,
+            "macd_1m": m_1m.iloc[-1],
+            "signal_1m": s_1m.iloc[-1],
+            "diff_1m": diff_1m_now,
+            "rsi_5m": rsi.iloc[-1],
         }
         
-        if not is_compressed:
-            if is_bull and 30 <= rsi.iloc[-1] <= 45:
-                return "BUY", result
-            elif is_bear and 55 <= rsi.iloc[-1] <= 70:
-                return "SELL", result
+        if is_bull and 30 <= rsi.iloc[-1] <= 45:
+            return "BUY", result
+        elif is_bear and 55 <= rsi.iloc[-1] <= 70:
+            return "SELL", result
         
         return "NEUTRAL", result
     except Exception as e:
@@ -172,26 +150,90 @@ def scanner_engine():
 
             for symbol in current_pairs:
                 try:
+                    # 5-minute data
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50:
                         continue
 
                     m, s, h, rsi = calculate_strategy(df)
 
-                    recent_volatility = abs(h.tail(20)).mean()
-                    is_compressed = abs(h.iloc[-1]) < (recent_volatility * 0.4)
+                    # Calculate 5-minute diffs
+                    prev_diff = m.iloc[-1] - s.iloc[-1]
+                    prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    is_bull = (m.iloc[-2] <= s.iloc[-2]) and (m.iloc[-1] > s.iloc[-1])
-                    is_bear = (m.iloc[-2] >= s.iloc[-2]) and (m.iloc[-1] < s.iloc[-1])
+                    # Get 1-minute data
+                    df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
+                    if len(df_1m) < 30:
+                        continue
+                    m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
 
-                    if not is_compressed:
-                        if (is_bull and 30 <= rsi.iloc[-1] <= 45) or \
-                           (is_bear and 55 <= rsi.iloc[-1] <= 70):
-                            if time.time() - alert_cooldowns.get(symbol, 0) > 300:
-                                diff = m.iloc[-1] - s.iloc[-1]
-                                direction = "BUY" if is_bull else "SELL"
-                                send_alert(direction, symbol, m.iloc[-1], s.iloc[-1], diff, rsi.iloc[-1])
-                                alert_cooldowns[symbol] = time.time()
+                    # 1-minute MACD current state
+                    diff_1m_now = m_1m.iloc[-1] - s_1m.iloc[-1]
+
+                    # 1-minute direction
+                    is_1m_bullish = diff_1m_now > 0
+                    is_1m_bearish = diff_1m_now < 0
+
+                    # 5-minute signals
+                    pre_bull = (prev_diff_before < 0) and (prev_diff > 0) and (30 <= rsi.iloc[-1] <= 45)
+                    pre_bear = (prev_diff_before > 0) and (prev_diff < 0) and (55 <= rsi.iloc[-1] <= 70)
+
+                    # PRE-ALERT: 5m sign change + 1m agrees
+                    alert_bull = pre_bull and is_1m_bullish
+                    alert_bear = pre_bear and is_1m_bearish
+
+                    # CONFIRMATION: 5m sign change + gap + 1m agrees
+                    confirm_bull = alert_bull and (abs(prev_diff) >= 0.00001)
+                    confirm_bear = alert_bear and (abs(prev_diff) >= 0.00001)
+
+                    # ⚠️ PRE-ALERT
+                    if alert_bull or alert_bear:
+                        if time.time() - alert_cooldowns.get(f"pre_{symbol}", 0) > 1800:
+                            direction = "BULLISH" if alert_bull else "BEARISH"
+                            pre_msg = (
+                                f"⚠️ *PRE-ALERT* {symbol}\n\n"
+                                f"Direction: {direction}\n"
+                                f"✅ 5m & 1m Both Agree!\n\n"
+                                f"5m Diff: {prev_diff_before:.5f} → {prev_diff:.5f}\n"
+                                f"1m Diff: {diff_1m_now:.5f}\n"
+                                f"5m RSI: {rsi.iloc[-1]:.2f}\n\n"
+                                f"Waiting for candle close..."
+                            )
+                            try:
+                                bot.send_message(CHAT_ID, pre_msg, parse_mode="Markdown")
+                            except:
+                                bot.send_message(CHAT_ID, pre_msg, parse_mode=None)
+                            alert_cooldowns[f"pre_{symbol}"] = time.time()
+
+                    # 🟢/🔴 CONFIRMATION
+                    if confirm_bull or confirm_bear:
+                        if time.time() - alert_cooldowns.get(symbol, 0) > 300:
+                            direction = "BUY" if confirm_bull else "SELL"
+                            icon = "🟢" if confirm_bull else "🔴"
+
+                            confirm_msg = (
+                                f"{icon} *{direction} CONFIRMED* {symbol}\n\n"
+                                f"✅ Candle Closed — 5m & 1m Agree!\n\n"
+                                f"5m MACD: {m.iloc[-1]:.5f} | Signal: {s.iloc[-1]:.5f}\n"
+                                f"5m Diff: {prev_diff:.5f}\n"
+                                f"1m MACD: {m_1m.iloc[-1]:.5f} | Signal: {s_1m.iloc[-1]:.5f}\n"
+                                f"1m Diff: {diff_1m_now:.5f}\n"
+                                f"5m RSI: {rsi.iloc[-1]:.2f}\n\n"
+                                f"Status: SAFE (Active Liquidity)"
+                            )
+
+                            kb = InlineKeyboardMarkup(row_width=2)
+                            kb.add(
+                                InlineKeyboardButton(f"📊 Quick Scan {symbol}", callback_data=f"quick_{symbol}"),
+                                InlineKeyboardButton("🔕 Mute 30min", callback_data=f"mute_{symbol}"),
+                                InlineKeyboardButton("❌ Remove Pair", callback_data=f"remove_{symbol}"),
+                            )
+
+                            try:
+                                bot.send_message(CHAT_ID, confirm_msg, reply_markup=kb, parse_mode="Markdown")
+                            except:
+                                bot.send_message(CHAT_ID, confirm_msg, reply_markup=kb, parse_mode=None)
+                            alert_cooldowns[symbol] = time.time()
 
                     time.sleep(1)
 
@@ -199,7 +241,7 @@ def scanner_engine():
                     logging.error(f"Scanner Error for {symbol}: {e}")
                     time.sleep(2)
 
-            time.sleep(60)
+            time.sleep(30)
         else:
             time.sleep(5)
 
@@ -209,11 +251,10 @@ def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
         bot.answer_callback_query(call.id, "Unauthorized")
         return
-    
+
     data = call.data
-    
+
     try:
-        # Main Menu
         if data == "main_menu":
             bot.edit_message_text(
                 "📋 *Main Menu*",
@@ -222,23 +263,20 @@ def handle_callback(call):
                 reply_markup=get_main_menu(),
                 parse_mode="Markdown"
             )
-        
-        # Status
+
         elif data == "status":
             status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}"
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
-        
-        # Watchlist (paginated)
+
         elif data == "watchlist" or data.startswith("page_info_"):
             page = int(data.split("_")[-1]) if data.startswith("page_info_") else 0
             with data_lock:
                 pairs = list(STRATEGY_PAIRS)
             kb = get_pairs_keyboard(pairs, "info", page)
             bot.edit_message_text(f"📋 *Watchlist ({len(pairs)} pairs)*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
-        # Remove menu (paginated)
+
         elif data == "remove_menu" or data.startswith("page_remove_"):
             page = int(data.split("_")[-1]) if data.startswith("page_remove_") else 0
             with data_lock:
@@ -248,12 +286,10 @@ def handle_callback(call):
             else:
                 kb = get_pairs_keyboard(pairs, "remove", page)
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
-        # Add menu
+
         elif data == "add_menu":
             bot.edit_message_text("➕ *Add a pair:*\nSend /add SYMBOL or choose below:", call.message.chat.id, call.message.message_id, reply_markup=get_add_suggestions(), parse_mode="Markdown")
-        
-        # Add specific pair
+
         elif data.startswith("add_"):
             pair = data.replace("add_", "")
             ticker = yf.Ticker(pair)
@@ -264,8 +300,7 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, f"✅ {pair} added!")
             else:
                 bot.answer_callback_query(call.id, f"❌ {pair} not found", show_alert=True)
-        
-        # Remove specific pair
+
         elif data.startswith("remove_"):
             pair = data.replace("remove_", "")
             with data_lock:
@@ -279,18 +314,15 @@ def handle_callback(call):
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 bot.edit_message_text("📭 No pairs left.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
-        
-        # Start scanner
+
         elif data == "start_scanner":
             STATE["running"] = True
             bot.answer_callback_query(call.id, "✅ Scanner started!")
 
-        # Pause scanner
         elif data == "pause_scanner":
             STATE["running"] = False
             bot.answer_callback_query(call.id, "⏸️ Scanner paused!")
-        
-        # Quick scan
+
         elif data == "quick_scan":
             with data_lock:
                 pairs = list(STRATEGY_PAIRS[:5])
@@ -302,13 +334,12 @@ def handle_callback(call):
                     icon = "🟢" if direction == "BUY" else "🔴"
                     r = result if isinstance(result, dict) else None
                     if r:
-                        results.append(f"{icon} {pair}: {direction} (RSI: {r['rsi']:.1f})")
+                        results.append(f"{icon} {pair}: {direction} (RSI: {r['rsi_5m']:.1f})")
             msg = "📊 *Quick Scan Results:*\n" + ("\n".join(results) if results else "No signals found.")
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="quick_scan"), InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
-        # Quick scan single from alert
+
         elif data.startswith("quick_"):
             pair = data.replace("quick_", "")
             bot.edit_message_text(f"🔍 *Scanning {pair}...*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
@@ -316,11 +347,12 @@ def handle_callback(call):
             if isinstance(result, dict):
                 icon = {"BUY": "🟢", "SELL": "🔴"}.get(direction, "⚪")
                 msg = (
-                    f"{icon} *{pair}*\n"
-                    f"MACD: {result['macd']:.5f}\n"
-                    f"Signal: {result['signal']:.5f}\n"
-                    f"RSI: {result['rsi']:.2f}\n"
-                    f"Compressed: {'Yes' if result['is_compressed'] else 'No'}\n"
+                    f"{icon} *{pair}*\n\n"
+                    f"5m MACD: {result['macd_5m']:.5f} | Signal: {result['signal_5m']:.5f}\n"
+                    f"5m Diff: {result['diff_5m']:.5f}\n"
+                    f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
+                    f"1m Diff: {result['diff_1m']:.5f}\n"
+                    f"5m RSI: {result['rsi_5m']:.2f}\n"
                     f"Signal: {direction}"
                 )
             else:
@@ -328,14 +360,12 @@ def handle_callback(call):
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔄 Rescan", callback_data=f"quick_{pair}"), InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
-        # Mute pair
+
         elif data.startswith("mute_"):
             pair = data.replace("mute_", "")
             alert_cooldowns[pair] = time.time() + 1800
             bot.answer_callback_query(call.id, f"🔕 {pair} muted for 30 min")
-        
-        # Info on specific pair
+
         elif data.startswith("info_"):
             pair = data.replace("info_", "")
             bot.edit_message_text(f"🔍 *Scanning {pair}...*", call.message.chat.id, call.message.message_id, parse_mode="Markdown")
@@ -343,12 +373,12 @@ def handle_callback(call):
             if isinstance(result, dict):
                 icon = {"BUY": "🟢", "SELL": "🔴"}.get(direction, "⚪")
                 msg = (
-                    f"{icon} *{pair}*\n"
-                    f"MACD: {result['macd']:.5f}\n"
-                    f"Signal: {result['signal']:.5f}\n"
-                    f"Diff: {result['diff']:.5f}\n"
-                    f"RSI: {result['rsi']:.2f}\n"
-                    f"Compressed: {'Yes' if result['is_compressed'] else 'No'}\n"
+                    f"{icon} *{pair}*\n\n"
+                    f"5m MACD: {result['macd_5m']:.5f} | Signal: {result['signal_5m']:.5f}\n"
+                    f"5m Diff: {result['diff_5m']:.5f}\n"
+                    f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
+                    f"1m Diff: {result['diff_1m']:.5f}\n"
+                    f"5m RSI: {result['rsi_5m']:.2f}\n"
                     f"Signal: {direction}"
                 )
             else:
@@ -359,26 +389,29 @@ def handle_callback(call):
                 InlineKeyboardButton("🔙 Watchlist", callback_data="watchlist"),
             )
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
-        # Help
+
         elif data == "help":
             help_text = (
                 "🤖 *Forex Scanner Bot*\n\n"
+                "*Alerts:*\n"
+                "⚠️ Pre-Alert: Sign change + 1m agrees\n"
+                "🟢/🔴 Confirmed: Candle closed + gap\n\n"
+                "*Strategy:* MACD Crossover + RSI Filter\n"
+                "*BUY:* Diff - → + | RSI 30-45\n"
+                "*SELL:* Diff + → - | RSI 55-70\n\n"
                 "*Commands:*\n"
                 "/start - Launch bot\n"
+                "/menu - Main menu\n"
                 "/add SYMBOL - Add pair\n"
-                "/remove SYMBOL - Remove pair\n\n"
-                "*Strategy:* MACD Crossover + RSI Filter (5m timeframe)\n"
-                "*BUY:* MACD bull cross + RSI 30-45\n"
-                "*SELL:* MACD bear cross + RSI 55-70"
+                "/remove SYMBOL - Remove pair"
             )
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
-        
+
         else:
             bot.answer_callback_query(call.id, "Unknown action")
-    
+
     except Exception as e:
         logging.error(f"Callback error: {e}")
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
@@ -389,7 +422,10 @@ def start(m):
     if str(m.chat.id) == CHAT_ID:
         bot.send_message(
             m.chat.id,
-            "🚀 *Forex Scanner Online*\n\nSelect an option:",
+            "🚀 *Forex Scanner Online*\n\n"
+            "⚠️ Pre-Alert: Sign change + 1m agrees\n"
+            "🟢/🔴 Confirmed: Candle closed + gap\n\n"
+            "Select an option:",
             reply_markup=get_main_menu(),
             parse_mode="Markdown"
         )
