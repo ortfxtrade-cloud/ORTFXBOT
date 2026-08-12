@@ -55,7 +55,11 @@ pair_settings = {}
 settings_state = {}
 
 # --- Martingale scheduler ---
-martingale_jobs = []  # {trigger_time, chat_id, symbol, direction, entry_time, msg_id}
+martingale_jobs = []
+
+# --- MACD Compression Filter ---
+compression_counter = {}
+compression_blocked = {}
 
 logging.basicConfig(level=logging.INFO)
 
@@ -136,22 +140,24 @@ def get_add_suggestions():
     kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
     return kb
 
-# --- Spread Detection (5-Minute Timeframe) ---
+# --- Spread Detection (1-Minute Timeframe) ---
 def is_spread_present(symbol):
     try:
         ticker = yf.Ticker(symbol)
-        df = ticker.history(period="1d", interval="5m")
-        if len(df) < 10: return False
-        last_candles = df.tail(5)
+        df = ticker.history(period="1d", interval="1m")
+        if len(df) < 15:
+            return False
+        last_candles = df.tail(15)
         high_low_range = last_candles['High'] - last_candles['Low']
         avg_range = high_low_range.mean()
         avg_price = last_candles['Close'].mean()
         body_size = abs(last_candles['Close'] - last_candles['Open'])
         avg_body = body_size.mean()
-        condition1 = avg_price > 0 and avg_range < avg_price * 0.0002
-        condition2 = avg_price > 0 and avg_body < avg_price * 0.00005
+        condition1 = avg_price > 0 and avg_range < avg_price * 0.0001
+        condition2 = avg_price > 0 and avg_body < avg_price * 0.00003
         condition3 = df.iloc[-1]['High'] == df.iloc[-1]['Low']
-        if sum([condition1, condition2, condition3]) >= 2: return True
+        if sum([condition1, condition2, condition3]) >= 2:
+            return True
         return False
     except Exception as e:
         logging.error(f"Spread check error {symbol}: {e}")
@@ -209,40 +215,9 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Martingale Scheduler ---
-def martingale_scheduler():
-    global martingale_jobs
-    while True:
-        now = time.time()
-        due = [job for job in martingale_jobs if job["trigger_time"] <= now]
-        for job in due:
-            symbol = job["symbol"]
-            pair_display = symbol.replace("=X", "")
-            direction = job["direction"]
-            entry_time = job["entry_time"]
-            msg_id = job["msg_id"]
-
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                InlineKeyboardButton("✅ WIN", callback_data=f"mart_win_{symbol}"),
-                InlineKeyboardButton("❌ LOSS", callback_data=f"mart_loss_{symbol}"),
-            )
-            bot.send_message(
-                job["chat_id"],
-                f"📊 Martingale series for {pair_display} completed.\n"
-                f"Direction: {direction}\n"
-                f"Entry: {entry_time}\n"
-                f"Did you win or lose?",
-                reply_markup=kb
-            )
-            # Store the msg_id for later feedback recording (optional)
-            # We can simply use the symbol + time as identifier; for now, the callback will just record feedback
-        martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
-        time.sleep(10)
-
-# --- Scanner Engine (Martingale Signals) ---
+# --- Scanner Engine (with MACD Compression Filter) ---
 def scanner_engine():
-    global alert_cooldowns, spread_blocked, signal_log, pair_loss_streak, pair_gap_multiplier, full_signal_messages, martingale_jobs
+    global alert_cooldowns, spread_blocked, signal_log, pair_loss_streak, pair_gap_multiplier, full_signal_messages, martingale_jobs, compression_counter, compression_blocked
     while True:
         if STATE["running"]:
             with data_lock:
@@ -250,6 +225,7 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
+                    # Spread filter (price flatness)
                     if symbol in spread_blocked:
                         if time.time() < spread_blocked[symbol]:
                             continue
@@ -260,12 +236,47 @@ def scanner_engine():
                             spread_blocked[symbol] = time.time() + 3600
                         continue
 
+                    # 5-minute data
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                     m, s, h, rsi = calculate_strategy(df)
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
+                    # ============ MACD COMPRESSION FILTER ============
+                    hist_abs = h.abs()
+                    if len(hist_abs) >= 100:
+                        avg_hist_abs = hist_abs.tail(100).mean()
+                    else:
+                        avg_hist_abs = hist_abs.mean()
+
+                    current_abs = abs(h.iloc[-1])
+                    low_threshold = avg_hist_abs * 0.20
+                    high_threshold = avg_hist_abs * 0.50
+
+                    if symbol not in compression_counter:
+                        compression_counter[symbol] = 0
+                    if symbol not in compression_blocked:
+                        compression_blocked[symbol] = False
+
+                    if compression_blocked[symbol]:
+                        # Blocked until current_abs > high_threshold
+                        if current_abs > high_threshold:
+                            compression_blocked[symbol] = False
+                            compression_counter[symbol] = 0
+                        else:
+                            continue  # remain blocked, skip this pair
+                    else:
+                        if current_abs < low_threshold:
+                            compression_counter[symbol] += 1
+                            if compression_counter[symbol] >= 10:
+                                compression_blocked[symbol] = True
+                                continue  # block now
+                        else:
+                            compression_counter[symbol] = 0
+                    # ================================================
+
+                    # Get 1-minute data
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -379,6 +390,34 @@ def scanner_engine():
             time.sleep(30)
         else:
             time.sleep(5)
+
+# --- Martingale Scheduler ---
+def martingale_scheduler():
+    global martingale_jobs
+    while True:
+        now = time.time()
+        due = [job for job in martingale_jobs if job["trigger_time"] <= now]
+        for job in due:
+            symbol = job["symbol"]
+            pair_display = symbol.replace("=X", "")
+            direction = job["direction"]
+            entry_time = job["entry_time"]
+
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                InlineKeyboardButton("✅ WIN", callback_data=f"mart_win_{symbol}"),
+                InlineKeyboardButton("❌ LOSS", callback_data=f"mart_loss_{symbol}"),
+            )
+            bot.send_message(
+                job["chat_id"],
+                f"📊 Martingale series for {pair_display} completed.\n"
+                f"Direction: {direction}\n"
+                f"Entry: {entry_time}\n"
+                f"Did you win or lose?",
+                reply_markup=kb
+            )
+        martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
+        time.sleep(10)
 
 # --- Feedback helper ---
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
@@ -662,7 +701,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers (FULLY CORRECTED) ---
+# --- Callback Handlers ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -671,12 +710,9 @@ def handle_callback(call):
     data = call.data
     msg_id = call.message.message_id
     try:
-        # Martingale feedback buttons
         if data.startswith("mart_win_") or data.startswith("mart_loss_"):
             result = "WIN" if data.startswith("mart_win_") else "LOSS"
-            # Extract symbol from callback (mart_win_EURUSD=X)
             symbol = data[9:] if data.startswith("mart_win_") else data[10:]
-            # Find the most recent signal for this symbol
             for entry in reversed(signal_log):
                 if entry.get("symbol") == symbol and not entry.get("result"):
                     record_feedback(entry["msg_id"], result)
@@ -689,7 +725,6 @@ def handle_callback(call):
             except:
                 pass
 
-        # WIN instant (if you still have old-style signals)
         elif data.startswith("win_"):
             success, extra_msg = record_feedback(msg_id, "WIN", 0)
             if success:
@@ -841,20 +876,21 @@ def handle_callback(call):
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
 
         elif data == "blocked_list":
-            if not spread_blocked:
+            if not spread_blocked and not compression_blocked:
                 msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
-                kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-                bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 msg = "🚫 *Blocked Pairs:*\n\n"
                 now = time.time()
                 for sym, end in spread_blocked.items():
                     rem = int((end - now)/60)
-                    msg += f"• {sym} — {rem} min remaining\n" if rem>0 else f"• {sym} — Expiring soon\n"
-                kb = InlineKeyboardMarkup().add(
-                    InlineKeyboardButton("🔄 Refresh", callback_data="blocked_list"),
-                    InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-                bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+                    msg += f"• {sym} — {rem} min remaining (spread)\n" if rem>0 else f"• {sym} — Expiring soon (spread)\n"
+                for sym, blocked in compression_blocked.items():
+                    if blocked:
+                        msg += f"• {sym} — MACD compression\n"
+            kb = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("🔄 Refresh", callback_data="blocked_list"),
+                InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
 
         elif data == "watchlist" or data.startswith("page_info_"):
             page = int(data.split("_")[-1]) if data.startswith("page_info_") else 0
