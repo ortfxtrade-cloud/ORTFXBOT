@@ -1,4 +1,4 @@
-import os
+hereimport os
 import re
 import time
 import random
@@ -31,7 +31,10 @@ STRATEGY_PAIRS = [
 ]
 STATE = {"running": True}
 alert_cooldowns = {}
-spread_blocked = {}
+
+# Separate spread block dictionaries
+spread_blocked_1m = {}
+spread_blocked_5m = {}
 
 # Learning
 signal_log = []
@@ -141,7 +144,7 @@ def get_add_suggestions():
     return kb
 
 # --- Spread Detection (1-Minute Timeframe) ---
-def is_spread_present(symbol):
+def is_spread_present_1m(symbol):
     try:
         ticker = yf.Ticker(symbol)
         df = ticker.history(period="1d", interval="1m")
@@ -160,7 +163,30 @@ def is_spread_present(symbol):
             return True
         return False
     except Exception as e:
-        logging.error(f"Spread check error {symbol}: {e}")
+        logging.error(f"1m spread check error {symbol}: {e}")
+        return False
+
+# --- Spread Detection (5-Minute Timeframe) ---
+def is_spread_present_5m(symbol):
+    try:
+        ticker = yf.Ticker(symbol)
+        df = ticker.history(period="1d", interval="5m")
+        if len(df) < 10:
+            return False
+        last_candles = df.tail(5)
+        high_low_range = last_candles['High'] - last_candles['Low']
+        avg_range = high_low_range.mean()
+        avg_price = last_candles['Close'].mean()
+        body_size = abs(last_candles['Close'] - last_candles['Open'])
+        avg_body = body_size.mean()
+        condition1 = avg_price > 0 and avg_range < avg_price * 0.0002
+        condition2 = avg_price > 0 and avg_body < avg_price * 0.00005
+        condition3 = df.iloc[-1]['High'] == df.iloc[-1]['Low']
+        if sum([condition1, condition2, condition3]) >= 2:
+            return True
+        return False
+    except Exception as e:
+        logging.error(f"5m spread check error {symbol}: {e}")
         return False
 
 # --- Strategy ---
@@ -215,9 +241,9 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Scanner Engine (with MACD Compression Filter) ---
+# --- Scanner Engine ---
 def scanner_engine():
-    global alert_cooldowns, spread_blocked, signal_log, pair_loss_streak, pair_gap_multiplier, full_signal_messages, martingale_jobs, compression_counter, compression_blocked
+    global alert_cooldowns, signal_log, pair_loss_streak, pair_gap_multiplier, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_1m, spread_blocked_5m
     while True:
         if STATE["running"]:
             with data_lock:
@@ -225,18 +251,29 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # Spread filter (price flatness)
-                    if symbol in spread_blocked:
-                        if time.time() < spread_blocked[symbol]:
+                    # --- 1-minute spread filter (12 minute block) ---
+                    if symbol in spread_blocked_1m:
+                        if time.time() < spread_blocked_1m[symbol]:
                             continue
                         else:
-                            del spread_blocked[symbol]
-                    if is_spread_present(symbol):
-                        if symbol not in spread_blocked:
-                            spread_blocked[symbol] = time.time() + 3600
+                            del spread_blocked_1m[symbol]
+                    if is_spread_present_1m(symbol):
+                        if symbol not in spread_blocked_1m:
+                            spread_blocked_1m[symbol] = time.time() + 720   # 12 minutes
                         continue
 
-                    # 5-minute data
+                    # --- 5-minute spread filter (1 hour block) ---
+                    if symbol in spread_blocked_5m:
+                        if time.time() < spread_blocked_5m[symbol]:
+                            continue
+                        else:
+                            del spread_blocked_5m[symbol]
+                    if is_spread_present_5m(symbol):
+                        if symbol not in spread_blocked_5m:
+                            spread_blocked_5m[symbol] = time.time() + 3600  # 1 hour
+                        continue
+
+                    # 5-minute data for MACD
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                     m, s, h, rsi = calculate_strategy(df)
@@ -260,23 +297,22 @@ def scanner_engine():
                         compression_blocked[symbol] = False
 
                     if compression_blocked[symbol]:
-                        # Blocked until current_abs > high_threshold
                         if current_abs > high_threshold:
                             compression_blocked[symbol] = False
                             compression_counter[symbol] = 0
                         else:
-                            continue  # remain blocked, skip this pair
+                            continue  # remain blocked
                     else:
                         if current_abs < low_threshold:
                             compression_counter[symbol] += 1
                             if compression_counter[symbol] >= 10:
                                 compression_blocked[symbol] = True
-                                continue  # block now
+                                continue
                         else:
                             compression_counter[symbol] = 0
                     # ================================================
 
-                    # Get 1-minute data
+                    # 1-minute data for gap confirmation
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -870,20 +906,23 @@ def handle_callback(call):
             bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, call.message.message_id,
                                   reply_markup=get_main_menu(), parse_mode="Markdown")
         elif data == "status":
-            blocked_count = len(spread_blocked)
+            blocked_count = len(spread_blocked_1m) + len(spread_blocked_5m) + sum(compression_blocked.values())
             status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}"
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
 
         elif data == "blocked_list":
-            if not spread_blocked and not compression_blocked:
+            if not spread_blocked_1m and not spread_blocked_5m and not any(compression_blocked.values()):
                 msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
             else:
                 msg = "🚫 *Blocked Pairs:*\n\n"
                 now = time.time()
-                for sym, end in spread_blocked.items():
+                for sym, end in spread_blocked_1m.items():
                     rem = int((end - now)/60)
-                    msg += f"• {sym} — {rem} min remaining (spread)\n" if rem>0 else f"• {sym} — Expiring soon (spread)\n"
+                    msg += f"• {sym} — {rem} min remaining (1m spread)\n" if rem > 0 else f"• {sym} — Expiring soon (1m spread)\n"
+                for sym, end in spread_blocked_5m.items():
+                    rem = int((end - now)/60)
+                    msg += f"• {sym} — {rem} min remaining (5m spread)\n" if rem > 0 else f"• {sym} — Expiring soon (5m spread)\n"
                 for sym, blocked in compression_blocked.items():
                     if blocked:
                         msg += f"• {sym} — MACD compression\n"
