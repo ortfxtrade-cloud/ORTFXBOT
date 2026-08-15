@@ -32,8 +32,8 @@ STRATEGY_PAIRS = [
 STATE = {"running": True}
 alert_cooldowns = {}
 
-# Only 5-minute spread block dictionary
-spread_blocked_5m = {}
+# Spread block now stores a simple timestamp (no OANDA)
+spread_blocked_5m = {}   # symbol -> blocked_since (time.time())
 
 # Learning
 signal_log = []
@@ -54,10 +54,6 @@ DEFAULT_RSI_SELL_MAX = 70
 pair_settings = {}
 settings_state = {}
 
-# --- NEW: Overbought bars filter settings ---
-DEFAULT_MAX_OVERBOUGHT_BARS = 15   # number of consecutive 5m candles with RSI>70 before blocking SELL
-pair_overbought_settings = {}      # symbol -> int
-
 # --- Martingale scheduler ---
 martingale_jobs = []
 
@@ -73,27 +69,22 @@ def health_check():
 
 # --- Helper: get effective settings for a pair ---
 def get_effective_settings(symbol):
-    # RSI settings
     if symbol in pair_settings:
-        rsi = {
+        return {
             "rsi_buy_min": pair_settings[symbol].get("rsi_buy_min", DEFAULT_RSI_BUY_MIN),
             "rsi_buy_max": pair_settings[symbol].get("rsi_buy_max", DEFAULT_RSI_BUY_MAX),
             "rsi_sell_min": pair_settings[symbol].get("rsi_sell_min", DEFAULT_RSI_SELL_MIN),
             "rsi_sell_max": pair_settings[symbol].get("rsi_sell_max", DEFAULT_RSI_SELL_MAX)
         }
     else:
-        rsi = {
+        return {
             "rsi_buy_min": DEFAULT_RSI_BUY_MIN,
             "rsi_buy_max": DEFAULT_RSI_BUY_MAX,
             "rsi_sell_min": DEFAULT_RSI_SELL_MIN,
             "rsi_sell_max": DEFAULT_RSI_SELL_MAX
         }
-    # Overbought bars setting
-    max_bars = pair_overbought_settings.get(symbol, DEFAULT_MAX_OVERBOUGHT_BARS)
-    rsi["max_overbought_bars"] = max_bars
-    return rsi
 
-# --- Inline Keyboards ---
+# --- Inline Keyboards (unchanged) ---
 def get_main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -147,7 +138,7 @@ def get_add_suggestions():
     kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
     return kb
 
-# --- Spread Detection (5-Minute Timeframe) ---
+# --- Spread Detection (5-Minute Flat Market – yfinance) ---
 def is_spread_present_5m(symbol):
     try:
         ticker = yf.Ticker(symbol)
@@ -170,7 +161,7 @@ def is_spread_present_5m(symbol):
         logging.error(f"5m spread check error {symbol}: {e}")
         return False
 
-# --- Strategy ---
+# --- Strategy (MACD, RSI, latest 1m cross) ---
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
     slow_ema = df['Close'].ewm(span=26, adjust=False).mean()
@@ -187,10 +178,7 @@ def calculate_strategy(df):
     return macd, signal, hist, rsi
 
 def latest_1m_cross(diff_series):
-    """
-    Returns 'bull', 'bear', or None based on the most recent sign change.
-    Scans backward from the latest value.
-    """
+    """Returns 'bull', 'bear', or None based on the most recent sign change."""
     diffs = list(diff_series)
     for i in range(len(diffs)-1, 0, -1):
         if diffs[i-1] < 0 and diffs[i] > 0:
@@ -198,20 +186,6 @@ def latest_1m_cross(diff_series):
         elif diffs[i-1] > 0 and diffs[i] < 0:
             return 'bear'
     return None
-
-# --- NEW: Consecutive overbought bars helper ---
-def count_consecutive_overbought(rsi_series, threshold=70):
-    """
-    Count how many recent consecutive bars have RSI > threshold.
-    Returns 0 if the latest RSI is not > threshold.
-    """
-    count = 0
-    for val in reversed(rsi_series):
-        if val > threshold:
-            count += 1
-        else:
-            break
-    return count
 
 def quick_scan_single(symbol):
     try:
@@ -246,7 +220,7 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Scanner Engine ---
+# --- Scanner Engine (yfinance only, 60‑min spread block) ---
 def scanner_engine():
     global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m
     while True:
@@ -256,16 +230,19 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # --- 5-minute spread filter (1 hour block) ---
+                    # ========== SPREAD FILTER (yfinance only) ==========
                     if symbol in spread_blocked_5m:
-                        if time.time() < spread_blocked_5m[symbol]:
-                            continue
-                        else:
+                        blocked_since = spread_blocked_5m[symbol]
+                        if time.time() - blocked_since > 3600:   # 60 minutes
                             del spread_blocked_5m[symbol]
+                            logging.info(f"Unblocked {symbol} after 60 min")
+                        else:
+                            continue   # still blocked
+
                     if is_spread_present_5m(symbol):
-                        if symbol not in spread_blocked_5m:
-                            spread_blocked_5m[symbol] = time.time() + 3600
+                        spread_blocked_5m[symbol] = time.time()
                         continue
+                    # ===================================================
 
                     # 5-minute data for MACD
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
@@ -319,14 +296,8 @@ def scanner_engine():
                     settings = get_effective_settings(symbol)
                     rsi_val = rsi.iloc[-1]
 
-                    # --- NEW: Consecutive overbought bars filter ---
-                    overbought_bars = count_consecutive_overbought(rsi, threshold=70)
-                    max_bars = settings["max_overbought_bars"]
-                    # Block SELL if overbought streak is >= max_bars
-                    overbought_block = (overbought_bars >= max_bars)
-
                     confirm_bull = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001) and is_1m_bull and (settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"])
-                    confirm_bear = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001) and is_1m_bear and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]) and (not overbought_block)
+                    confirm_bear = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001) and is_1m_bear and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"])
 
                     if confirm_bull or confirm_bear:
                         if time.time() - alert_cooldowns.get(symbol, 0) > 300:
@@ -368,8 +339,7 @@ def scanner_engine():
                                 f"5m Diff: {prev_diff:.5f}\n"
                                 f"1m MACD: {m_1m.iloc[-1]:.5f} | Signal: {s_1m.iloc[-1]:.5f}\n"
                                 f"1m Diff: {diff_1m_series.iloc[-1]:.5f}\n"
-                                f"5m RSI: {rsi_val:.2f}\n"
-                                f"Overbought bars: {overbought_bars} (max {max_bars})\n\n"
+                                f"5m RSI: {rsi_val:.2f}\n\n"
                                 f"Status: SAFE (Active Liquidity)"
                             )
 
@@ -394,8 +364,6 @@ def scanner_engine():
                                     "signal_1m": s_1m.iloc[-1],
                                     "diff_1m": diff_1m_series.iloc[-1],
                                     "rsi_5m": rsi_val,
-                                    "overbought_bars": overbought_bars,
-                                    "max_overbought_bars": max_bars,
                                     "msg_id": sent_msg.message_id,
                                     "entry_delay": "",
                                     "loss_reason": "",
@@ -423,7 +391,7 @@ def scanner_engine():
         else:
             time.sleep(5)
 
-# --- Martingale Scheduler ---
+# --- Martingale Scheduler (unchanged) ---
 def martingale_scheduler():
     global martingale_jobs
     while True:
@@ -451,7 +419,7 @@ def martingale_scheduler():
         martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
         time.sleep(10)
 
-# --- Feedback helper ---
+# --- Feedback helper (unchanged) ---
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
     global pair_loss_streak, pair_entry_stats
     for entry in signal_log:
@@ -487,7 +455,7 @@ def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis="
             return True, None
     return False, None
 
-# --- Gemini API helper ---
+# --- Gemini API helper (unchanged) ---
 def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be concise."):
     api_key = "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ"
     try:
@@ -504,7 +472,7 @@ def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be
     except Exception as e:
         return f"❌ Error: {e}"
 
-# --- Loss Interview Flow ---
+# --- Loss Interview Flow (unchanged) ---
 def start_loss_interview(chat_id, msg_id):
     loss_interview_state[chat_id] = {"msg_id": msg_id, "step": "timing"}
     bot.send_message(chat_id, "⏱️ *When did you place the trade?*\nReply with something like: `immediately`, `30s`, `2m`, or a number in seconds.",
@@ -568,7 +536,7 @@ def process_loss_notes(message, msg_id):
         f"Reason given: {reason}\n"
         f"Additional notes: {notes if notes else 'None'}\n\n"
         "Determine if the bot's signal criteria were likely flawed. "
-        "If yes, suggest specific parameter adjustments (e.g., change RSI bounds or max_overbought_bars). "
+        "If yes, suggest specific parameter adjustments (e.g., change RSI bounds). "
         "If the loss was likely due to external factors (spread, news, market noise), reply 'No bot error detected.' "
         "Be concise."
     )
@@ -586,7 +554,7 @@ def process_loss_notes(message, msg_id):
 
     bot.edit_message_text(response, chat_id, thinking_msg.message_id, parse_mode="Markdown")
 
-# --- Settings Handlers (RSI + Overbought Bars) ---
+# --- Settings Handlers (RSI only) ---
 @bot.callback_query_handler(func=lambda call: call.data == "settings_menu")
 def settings_menu(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -620,7 +588,6 @@ def settings_target_selected(call):
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("📈 RSI Buy", callback_data="param_rsi_buy"))
     kb.add(InlineKeyboardButton("📉 RSI Sell", callback_data="param_rsi_sell"))
-    kb.add(InlineKeyboardButton("📊 Overbought Bars", callback_data="param_overbought_bars"))
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -651,14 +618,6 @@ def settings_param_selected(call):
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
         param_name = "rsi_sell"
-    elif param == "overbought_bars":
-        prompt_text = f"Enter new max consecutive overbought bars (RSI > 70) before blocking SELL. Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_MAX_OVERBOUGHT_BARS}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['max_overbought_bars']}"
-        param_name = "overbought_bars"
 
     state["param"] = param_name
     bot.edit_message_text(prompt_text, call.message.chat.id, call.message.message_id)
@@ -704,19 +663,6 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_sell_min"] = min_val
                     pair_settings[target]["rsi_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
-
-        elif param == "overbought_bars":
-            val = int(value)
-            if val < 0:
-                raise ValueError("Value must be >= 0 (0 means never block)")
-            if target == "all":
-                global DEFAULT_MAX_OVERBOUGHT_BARS
-                DEFAULT_MAX_OVERBOUGHT_BARS = val
-                bot.reply_to(message, f"✅ Global max_overbought_bars set to {val}")
-            else:
-                pair_overbought_settings[target] = val
-                bot.reply_to(message, f"✅ {target} max_overbought_bars set to {val}")
-
     except Exception as e:
         bot.reply_to(message, f"❌ Invalid input: {e}. Please try again.")
         settings_state.pop(chat_id, None)
@@ -725,7 +671,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers ---
+# --- Callback Handlers (updated blocked_list to show timestamps) ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -903,10 +849,8 @@ def handle_callback(call):
                 msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
             else:
                 msg = "🚫 *Blocked Pairs:*\n\n"
-                now = time.time()
-                for sym, end in spread_blocked_5m.items():
-                    rem = int((end - now)/60)
-                    msg += f"• {sym} — {rem} min remaining (5m spread)\n" if rem > 0 else f"• {sym} — Expiring soon (5m spread)\n"
+                for sym, blocked_since in spread_blocked_5m.items():
+                    msg += f"• {sym} — Spread (blocked since {time.strftime('%H:%M', time.localtime(blocked_since))})\n"
                 for sym, blocked in compression_blocked.items():
                     if blocked:
                         msg += f"• {sym} — MACD compression\n"
@@ -1052,10 +996,9 @@ def handle_callback(call):
                 "• 💬 Chat: ask me anything\n"
                 "• 🐛 Debug: analyze a signal\n"
                 "• 🧪 Test AI: check connection\n"
-                "• ⚙️ Settings: adjust RSI and Overbought Bars\n"
+                "• ⚙️ Settings: adjust RSI\n"
                 "• 📈 Stats / ⏱️ Entry\n\n"
-                "RSI: configurable per pair\n"
-                "Overbought Bars: number of consecutive 5m RSI>70 before blocking SELL"
+                "RSI: configurable per pair"
             )
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
