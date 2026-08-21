@@ -57,7 +57,6 @@ DEFAULT_RSI_BUY_MAX = 40
 DEFAULT_RSI_SELL_MIN = 50
 DEFAULT_RSI_SELL_MAX = 70
 
-# New 1m RSI defaults
 DEFAULT_RSI_1M_BUY_MIN = 30
 DEFAULT_RSI_1M_BUY_MAX = 40
 DEFAULT_RSI_1M_SELL_MIN = 50
@@ -79,7 +78,7 @@ logging.basicConfig(level=logging.INFO)
 def health_check():
     return "Bot is running!"
 
-# --- Helper: get effective settings for a pair (now includes 1m RSI) ---
+# --- Helper: get effective settings for a pair ---
 def get_effective_settings(symbol):
     if symbol in pair_settings:
         return {
@@ -104,13 +103,14 @@ def get_effective_settings(symbol):
             "rsi_1m_sell_max": DEFAULT_RSI_1M_SELL_MAX
         }
 
-# --- Inline Keyboards (unchanged) ---
+# --- Inline Keyboards ---
 def get_main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
         InlineKeyboardButton("📊 Status", callback_data="status"),
         InlineKeyboardButton("📋 Watchlist", callback_data="watchlist"),
         InlineKeyboardButton("🚫 Blocked", callback_data="blocked_list"),
+        InlineKeyboardButton("📋 Conditions", callback_data="signal_conditions"),
         InlineKeyboardButton("📈 Stats", callback_data="stats_page"),
         InlineKeyboardButton("⏱️ Entry", callback_data="entry_menu"),
         InlineKeyboardButton("💬 Chat", callback_data="chat_start"),
@@ -271,7 +271,86 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Scanner Engine (Hybrid Spread Filter + 1m RSI confirmation) ---
+# --- NEW: Diagnose all conditions for a pair ---
+def diagnose_pair(symbol):
+    """Check all signal conditions and return a status message."""
+    try:
+        df = yf.Ticker(symbol).history(period="5d", interval="5m")
+        if len(df) < 50:
+            return "❌ Not enough data to evaluate."
+        m, s, h, rsi = calculate_strategy(df)
+        prev_diff = m.iloc[-1] - s.iloc[-1]
+        prev_diff_before = m.iloc[-2] - s.iloc[-2]
+
+        df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
+        if len(df_1m) < 30:
+            return "❌ Not enough 1m data."
+        m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
+        diff_1m_series = m_1m - s_1m
+        cross_1m = latest_1m_cross(diff_1m_series)
+
+        settings = get_effective_settings(symbol)
+        rsi_val = rsi.iloc[-1]
+        rsi_1m_val = rsi_1m.iloc[-1]
+
+        # Spread filter
+        spread_blocked = symbol in spread_blocked_5m
+        if not spread_blocked:
+            spread_blocked = is_spread_present_5m(symbol)
+        spread_ok = not spread_blocked
+
+        # MACD compression
+        hist_abs = h.abs()
+        avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
+        current_abs = abs(h.iloc[-1])
+        low_thresh = avg_hist_abs * 0.20
+        high_thresh = avg_hist_abs * 0.50
+        if symbol in compression_blocked and compression_blocked[symbol]:
+            compression_ok = False
+        else:
+            compression_ok = not (current_abs < low_thresh and compression_counter.get(symbol, 0) >= 10)
+
+        # 5m cross
+        bull_5m = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001)
+        bear_5m = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001)
+
+        # 1m cross
+        bull_1m = (cross_1m == 'bull')
+        bear_1m = (cross_1m == 'bear')
+
+        # RSI ranges
+        rsi5_buy = settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]
+        rsi5_sell = settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]
+        rsi1_buy = settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]
+        rsi1_sell = settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]
+
+        # Cooldown
+        cd = alert_cooldowns.get(symbol, 0)
+        cooldown_ok = (time.time() - cd) > 300
+
+        # Build report
+        pair_display = symbol.replace("=X", "")
+        report = f"📋 *Conditions for {pair_display}*\n\n"
+        report += f"Spread filter: {'✅' if spread_ok else '❌'}\n"
+        report += f"MACD compression: {'✅' if compression_ok else '❌'}\n"
+        report += f"5m MACD cross: {'🟢 Bullish' if bull_5m else '🔴 Bearish' if bear_5m else '❌ None'}\n"
+        report += f"Latest 1m cross: {'🟢 Bullish' if bull_1m else '🔴 Bearish' if bear_1m else '❌ None'}\n"
+        report += f"5m RSI ({rsi_val:.1f}): {'✅' if (rsi5_buy or rsi5_sell) else '❌'}\n"
+        report += f"1m RSI ({rsi_1m_val:.1f}): {'✅' if (rsi1_buy or rsi1_sell) else '❌'}\n"
+        report += f"Cooldown: {'✅' if cooldown_ok else '❌'}\n\n"
+
+        if bull_5m and bull_1m and rsi5_buy and rsi1_buy and spread_ok and compression_ok and cooldown_ok:
+            report += "🟢 *BUY signal READY*"
+        elif bear_5m and bear_1m and rsi5_sell and rsi1_sell and spread_ok and compression_ok and cooldown_ok:
+            report += "🔴 *SELL signal READY*"
+        else:
+            report += "⏳ *No signal ready yet*"
+
+        return report
+    except Exception as e:
+        return f"❌ Error: {e}"
+
+# --- Scanner Engine ---
 def scanner_engine():
     global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m
     while True:
@@ -319,11 +398,7 @@ def scanner_engine():
 
                     # ============ MACD COMPRESSION FILTER ============
                     hist_abs = h.abs()
-                    if len(hist_abs) >= 100:
-                        avg_hist_abs = hist_abs.tail(100).mean()
-                    else:
-                        avg_hist_abs = hist_abs.mean()
-
+                    avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
                     low_threshold = avg_hist_abs * 0.20
                     high_threshold = avg_hist_abs * 0.50
@@ -349,7 +424,6 @@ def scanner_engine():
                             compression_counter[symbol] = 0
                     # ================================================
 
-                    # 1-minute data for cross confirmation and RSI
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -422,6 +496,7 @@ def scanner_engine():
                             kb = InlineKeyboardMarkup(row_width=2)
                             kb.add(
                                 InlineKeyboardButton("🔍 More Details", callback_data=f"showdetails_"),
+                                InlineKeyboardButton("📋 Conditions", callback_data=f"cond_{symbol}"),
                                 InlineKeyboardButton("📊 Quick Scan", callback_data=f"quick_{symbol}"),
                                 InlineKeyboardButton("🔕 Mute 30min", callback_data=f"mute_{symbol}"),
                                 InlineKeyboardButton("❌ Remove Pair", callback_data=f"remove_{symbol}"),
@@ -468,7 +543,7 @@ def scanner_engine():
         else:
             time.sleep(5)
 
-# --- Martingale Scheduler (unchanged) ---
+# --- Martingale Scheduler ---
 def martingale_scheduler():
     global martingale_jobs
     while True:
@@ -496,7 +571,7 @@ def martingale_scheduler():
         martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
         time.sleep(10)
 
-# --- Feedback helper (unchanged) ---
+# --- Feedback helper ---
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
     global pair_loss_streak, pair_entry_stats
     for entry in signal_log:
@@ -532,7 +607,7 @@ def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis="
             return True, None
     return False, None
 
-# --- Gemini API helper (unchanged) ---
+# --- Gemini API helper ---
 def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be concise."):
     api_key = "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ"
     try:
@@ -549,7 +624,7 @@ def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be
     except Exception as e:
         return f"❌ Error: {e}"
 
-# --- Loss Interview Flow (unchanged) ---
+# --- Loss Interview Flow ---
 def start_loss_interview(chat_id, msg_id):
     loss_interview_state[chat_id] = {"msg_id": msg_id, "step": "timing"}
     bot.send_message(chat_id, "⏱️ *When did you place the trade?*\nReply with something like: `immediately`, `30s`, `2m`, or a number in seconds.",
@@ -631,7 +706,7 @@ def process_loss_notes(message, msg_id):
 
     bot.edit_message_text(response, chat_id, thinking_msg.message_id, parse_mode="Markdown")
 
-# --- Settings Handlers (updated to include 1m RSI) ---
+# --- Settings Handlers ---
 @bot.callback_query_handler(func=lambda call: call.data == "settings_menu")
 def settings_menu(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -769,19 +844,7 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
         else:
-            # Gap multiplier handling (kept for backward compatibility)
-            mult = float(value)
-            if mult <= 0 or mult > 2:
-                raise ValueError("Multiplier must be >0 and ≤2")
-            if target == "all":
-                global DEFAULT_GAP_MULTIPLIER
-                DEFAULT_GAP_MULTIPLIER = mult
-                bot.reply_to(message, f"✅ Global gap multiplier set to {mult}")
-            else:
-                if target not in pair_settings:
-                    pair_settings[target] = {}
-                pair_settings[target]["gap_multiplier"] = mult
-                bot.reply_to(message, f"✅ {target} gap multiplier set to {mult}")
+            bot.reply_to(message, "Unknown parameter.")
     except Exception as e:
         bot.reply_to(message, f"❌ Invalid input: {e}. Please try again.")
         settings_state.pop(chat_id, None)
@@ -790,7 +853,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers (updated for status/blocked) ---
+# --- Callback Handlers (with Conditions) ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -901,6 +964,43 @@ def handle_callback(call):
                         new_kb.add(*new_row)
                 bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
                 bot.answer_callback_query(call.id, "Hiding details")
+
+        # NEW: Conditions menu flow
+        elif data == "signal_conditions":
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(
+                InlineKeyboardButton("🔍 Choose from list", callback_data="cond_list"),
+                InlineKeyboardButton("✏️ Enter pair manually", callback_data="cond_manual"),
+                InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+            )
+            bot.edit_message_text("📋 *Check Signal Conditions*\nChoose a method:", call.message.chat.id,
+                                  call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        elif data == "cond_list":
+            with data_lock:
+                pairs = list(STRATEGY_PAIRS)
+            kb = InlineKeyboardMarkup(row_width=2)
+            for pair in pairs[:10]:   # first 10 pairs for simplicity
+                kb.add(InlineKeyboardButton(pair, callback_data=f"cond_{pair}"))
+            kb.add(InlineKeyboardButton("🔙 Back", callback_data="signal_conditions"))
+            bot.edit_message_text("Select a pair:", call.message.chat.id, call.message.message_id,
+                                  reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        elif data == "cond_manual":
+            msg = bot.send_message(call.message.chat.id,
+                                   "Please type the pair symbol (e.g., EURUSD=X, GBPJPY=X):",
+                                   parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_cond_manual)
+            bot.answer_callback_query(call.id)
+
+        elif data.startswith("cond_"):
+            pair = data[5:]
+            logging.info(f"Condition check for {pair}")
+            report = diagnose_pair(pair)
+            bot.send_message(call.message.chat.id, report, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Conditions checked")
 
         elif data == "quick_scan":
             with data_lock: pairs = list(STRATEGY_PAIRS[:5])
@@ -1118,6 +1218,7 @@ def handle_callback(call):
                 "• 🐛 Debug: analyze a signal\n"
                 "• 🧪 Test AI: check connection\n"
                 "• ⚙️ Settings: adjust RSI (5m & 1m)\n"
+                "• 📋 Conditions: live checklist\n"
                 "• 📈 Stats / ⏱️ Entry\n\n"
                 "RSI: configurable per pair"
             )
@@ -1132,7 +1233,18 @@ def handle_callback(call):
         logging.error(f"Callback error: {e}")
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
 
-# --- Old feedback reply handler (unchanged) ---
+# --- Process manual condition check ---
+def process_cond_manual(message):
+    if str(message.chat.id) != CHAT_ID:
+        return
+    pair = message.text.strip().upper()
+    # Validate if pair exists or try with =X
+    if "=X" not in pair:
+        pair += "=X"
+    report = diagnose_pair(pair)
+    bot.reply_to(message, report, parse_mode="Markdown")
+
+# --- Old feedback reply handler ---
 def process_feedback_reply(message, msg_id):
     if str(message.chat.id) != CHAT_ID: return
     pending_feedback.pop(message.chat.id, None)
