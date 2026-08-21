@@ -19,6 +19,12 @@ bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
 app = Flask(__name__)
 
+# --- OANDA Spread Filter Settings (Hybrid) ---
+OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
+OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
+MAX_SPREAD_PIPS = float(os.environ.get("MAX_SPREAD_PIPS", "3.0"))
+UNBLOCK_CONSECUTIVE_CHECKS = int(os.environ.get("UNBLOCK_CONSECUTIVE_CHECKS", "2"))
+
 # --- Global State ---
 data_lock = threading.Lock()
 STRATEGY_PAIRS = [
@@ -32,8 +38,7 @@ STRATEGY_PAIRS = [
 STATE = {"running": True}
 alert_cooldowns = {}
 
-# Spread block now stores a simple timestamp (no OANDA)
-spread_blocked_5m = {}   # symbol -> blocked_since (time.time())
+spread_blocked_5m = {}
 
 # Learning
 signal_log = []
@@ -46,11 +51,18 @@ loss_interview_state = {}
 # Chat / Debug mode
 chat_mode = {}
 
-# --- Default RSI settings ---
+# --- Default RSI settings (5m + 1m) ---
 DEFAULT_RSI_BUY_MIN = 30
 DEFAULT_RSI_BUY_MAX = 40
 DEFAULT_RSI_SELL_MIN = 50
 DEFAULT_RSI_SELL_MAX = 70
+
+# New 1m RSI defaults
+DEFAULT_RSI_1M_BUY_MIN = 30
+DEFAULT_RSI_1M_BUY_MAX = 40
+DEFAULT_RSI_1M_SELL_MIN = 50
+DEFAULT_RSI_1M_SELL_MAX = 70
+
 pair_settings = {}
 settings_state = {}
 
@@ -67,21 +79,29 @@ logging.basicConfig(level=logging.INFO)
 def health_check():
     return "Bot is running!"
 
-# --- Helper: get effective settings for a pair ---
+# --- Helper: get effective settings for a pair (now includes 1m RSI) ---
 def get_effective_settings(symbol):
     if symbol in pair_settings:
         return {
             "rsi_buy_min": pair_settings[symbol].get("rsi_buy_min", DEFAULT_RSI_BUY_MIN),
             "rsi_buy_max": pair_settings[symbol].get("rsi_buy_max", DEFAULT_RSI_BUY_MAX),
             "rsi_sell_min": pair_settings[symbol].get("rsi_sell_min", DEFAULT_RSI_SELL_MIN),
-            "rsi_sell_max": pair_settings[symbol].get("rsi_sell_max", DEFAULT_RSI_SELL_MAX)
+            "rsi_sell_max": pair_settings[symbol].get("rsi_sell_max", DEFAULT_RSI_SELL_MAX),
+            "rsi_1m_buy_min": pair_settings[symbol].get("rsi_1m_buy_min", DEFAULT_RSI_1M_BUY_MIN),
+            "rsi_1m_buy_max": pair_settings[symbol].get("rsi_1m_buy_max", DEFAULT_RSI_1M_BUY_MAX),
+            "rsi_1m_sell_min": pair_settings[symbol].get("rsi_1m_sell_min", DEFAULT_RSI_1M_SELL_MIN),
+            "rsi_1m_sell_max": pair_settings[symbol].get("rsi_1m_sell_max", DEFAULT_RSI_1M_SELL_MAX)
         }
     else:
         return {
             "rsi_buy_min": DEFAULT_RSI_BUY_MIN,
             "rsi_buy_max": DEFAULT_RSI_BUY_MAX,
             "rsi_sell_min": DEFAULT_RSI_SELL_MIN,
-            "rsi_sell_max": DEFAULT_RSI_SELL_MAX
+            "rsi_sell_max": DEFAULT_RSI_SELL_MAX,
+            "rsi_1m_buy_min": DEFAULT_RSI_1M_BUY_MIN,
+            "rsi_1m_buy_max": DEFAULT_RSI_1M_BUY_MAX,
+            "rsi_1m_sell_min": DEFAULT_RSI_1M_SELL_MIN,
+            "rsi_1m_sell_max": DEFAULT_RSI_1M_SELL_MAX
         }
 
 # --- Inline Keyboards (unchanged) ---
@@ -161,7 +181,36 @@ def is_spread_present_5m(symbol):
         logging.error(f"5m spread check error {symbol}: {e}")
         return False
 
-# --- Strategy (MACD, RSI, latest 1m cross) ---
+# --- OANDA Live Spread Helper ---
+def get_oanda_spread_pips(symbol):
+    if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
+        return None
+    instrument = symbol.replace("=X", "")
+    base = instrument[:3]
+    quote = instrument[3:]
+    oanda_symbol = f"{base}_{quote}"
+    try:
+        url = f"https://api-fxtrade.oanda.com/v3/instruments/{oanda_symbol}/pricing"
+        headers = {"Authorization": f"Bearer {OANDA_API_KEY}"}
+        params = {"instruments": oanda_symbol}
+        response = requests.get(url, headers=headers, params=params, timeout=5)
+        data = response.json()
+        prices = data.get("prices", [])
+        if not prices:
+            return None
+        bid = float(prices[0]["bids"][0]["price"])
+        ask = float(prices[0]["asks"][0]["price"])
+        spread = ask - bid
+        if "JPY" in quote:
+            pip_size = 0.01
+        else:
+            pip_size = 0.0001
+        return round(spread / pip_size, 2)
+    except Exception as e:
+        logging.error(f"OANDA spread check error {symbol}: {e}")
+        return None
+
+# --- Strategy ---
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
     slow_ema = df['Close'].ewm(span=26, adjust=False).mean()
@@ -178,7 +227,6 @@ def calculate_strategy(df):
     return macd, signal, hist, rsi
 
 def latest_1m_cross(diff_series):
-    """Returns 'bull', 'bear', or None based on the most recent sign change."""
     diffs = list(diff_series)
     for i in range(len(diffs)-1, 0, -1):
         if diffs[i-1] < 0 and diffs[i] > 0:
@@ -204,23 +252,26 @@ def quick_scan_single(symbol):
 
         settings = get_effective_settings(symbol)
         rsi_val = rsi.iloc[-1]
+        rsi_1m_val = rsi_1m.iloc[-1]
 
         is_bull = (prev_diff_before < 0) and (prev_diff > 0) and is_1m_bull
         is_bear = (prev_diff_before > 0) and (prev_diff < 0) and is_1m_bear
 
-        if is_bull and settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]:
+        if is_bull and settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"] \
+                and settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]:
             return "BUY", {"symbol": symbol, "macd_5m": m.iloc[-1], "signal_5m": s.iloc[-1],
                            "diff_5m": prev_diff, "macd_1m": m_1m.iloc[-1], "signal_1m": s_1m.iloc[-1],
-                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val}
-        elif is_bear and settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]:
+                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val, "rsi_1m": rsi_1m_val}
+        elif is_bear and settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"] \
+                and settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]:
             return "SELL", {"symbol": symbol, "macd_5m": m.iloc[-1], "signal_5m": s.iloc[-1],
                            "diff_5m": prev_diff, "macd_1m": m_1m.iloc[-1], "signal_1m": s_1m.iloc[-1],
-                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val}
+                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val, "rsi_1m": rsi_1m_val}
         return "NEUTRAL", None
     except Exception as e:
         return None, str(e)
 
-# --- Scanner Engine (yfinance only, 60‑min spread block) ---
+# --- Scanner Engine (Hybrid Spread Filter + 1m RSI confirmation) ---
 def scanner_engine():
     global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m
     while True:
@@ -230,21 +281,36 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # ========== SPREAD FILTER (yfinance only) ==========
+                    # ========== HYBRID SPREAD FILTER ==========
                     if symbol in spread_blocked_5m:
-                        blocked_since = spread_blocked_5m[symbol]
-                        if time.time() - blocked_since > 3600:   # 60 minutes
-                            del spread_blocked_5m[symbol]
-                            logging.info(f"Unblocked {symbol} after 60 min")
+                        blocked_info = spread_blocked_5m[symbol]
+                        if OANDA_API_KEY and OANDA_ACCOUNT_ID:
+                            spread_pips = get_oanda_spread_pips(symbol)
+                            if spread_pips is not None:
+                                if spread_pips <= MAX_SPREAD_PIPS:
+                                    blocked_info['low_spread_count'] = blocked_info.get('low_spread_count', 0) + 1
+                                    if blocked_info['low_spread_count'] >= UNBLOCK_CONSECUTIVE_CHECKS:
+                                        del spread_blocked_5m[symbol]
+                                        logging.info(f"Unblocked {symbol} – OANDA spread {spread_pips} pips")
+                                else:
+                                    blocked_info['low_spread_count'] = 0
+                            else:
+                                if time.time() - blocked_info['blocked_since'] > 1800:
+                                    del spread_blocked_5m[symbol]
                         else:
-                            continue   # still blocked
+                            if time.time() - blocked_info['blocked_since'] > 1800:
+                                del spread_blocked_5m[symbol]
+                        if symbol in spread_blocked_5m:
+                            continue
 
                     if is_spread_present_5m(symbol):
-                        spread_blocked_5m[symbol] = time.time()
+                        spread_blocked_5m[symbol] = {
+                            'blocked_since': time.time(),
+                            'low_spread_count': 0
+                        }
                         continue
-                    # ===================================================
+                    # =========================================
 
-                    # 5-minute data for MACD
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                     m, s, h, rsi = calculate_strategy(df)
@@ -283,7 +349,7 @@ def scanner_engine():
                             compression_counter[symbol] = 0
                     # ================================================
 
-                    # 1-minute data for cross confirmation
+                    # 1-minute data for cross confirmation and RSI
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -295,9 +361,17 @@ def scanner_engine():
 
                     settings = get_effective_settings(symbol)
                     rsi_val = rsi.iloc[-1]
+                    rsi_1m_val = rsi_1m.iloc[-1]
 
-                    confirm_bull = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001) and is_1m_bull and (settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"])
-                    confirm_bear = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001) and is_1m_bear and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"])
+                    confirm_bull = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001) \
+                                   and is_1m_bull \
+                                   and (settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]) \
+                                   and (settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"])
+
+                    confirm_bear = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001) \
+                                   and is_1m_bear \
+                                   and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]) \
+                                   and (settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"])
 
                     if confirm_bull or confirm_bear:
                         if time.time() - alert_cooldowns.get(symbol, 0) > 300:
@@ -326,6 +400,7 @@ def scanner_engine():
                                 f"⏱ Expiration: 5 minutes\n"
                                 f"⏰ Entry: {entry_time_str}\n"
                                 f"{arrow} Direction: {direction}\n"
+                                f"1m RSI: {rsi_1m_val:.2f}\n"
                                 f"📊 Martingale:\n"
                                 f"1⃣ {mart1}\n"
                                 f"2⃣ {mart2}\n"
@@ -339,7 +414,8 @@ def scanner_engine():
                                 f"5m Diff: {prev_diff:.5f}\n"
                                 f"1m MACD: {m_1m.iloc[-1]:.5f} | Signal: {s_1m.iloc[-1]:.5f}\n"
                                 f"1m Diff: {diff_1m_series.iloc[-1]:.5f}\n"
-                                f"5m RSI: {rsi_val:.2f}\n\n"
+                                f"5m RSI: {rsi_val:.2f}\n"
+                                f"1m RSI: {rsi_1m_val:.2f}\n\n"
                                 f"Status: SAFE (Active Liquidity)"
                             )
 
@@ -364,6 +440,7 @@ def scanner_engine():
                                     "signal_1m": s_1m.iloc[-1],
                                     "diff_1m": diff_1m_series.iloc[-1],
                                     "rsi_5m": rsi_val,
+                                    "rsi_1m": rsi_1m_val,
                                     "msg_id": sent_msg.message_id,
                                     "entry_delay": "",
                                     "loss_reason": "",
@@ -524,7 +601,7 @@ def process_loss_notes(message, msg_id):
             signal_details = (
                 f"Signal: {entry['direction']} {entry['symbol']}\n"
                 f"5m Diff: {entry['diff_5m']:.5f}, 1m Diff: {entry['diff_1m']:.5f}, "
-                f"RSI: {entry['rsi_5m']:.2f}"
+                f"5m RSI: {entry['rsi_5m']:.2f}, 1m RSI: {entry['rsi_1m']:.2f}"
             )
             break
 
@@ -554,7 +631,7 @@ def process_loss_notes(message, msg_id):
 
     bot.edit_message_text(response, chat_id, thinking_msg.message_id, parse_mode="Markdown")
 
-# --- Settings Handlers (RSI only) ---
+# --- Settings Handlers (updated to include 1m RSI) ---
 @bot.callback_query_handler(func=lambda call: call.data == "settings_menu")
 def settings_menu(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -586,8 +663,10 @@ def settings_target_selected(call):
     settings_state[call.message.chat.id] = {"target": target}
 
     kb = InlineKeyboardMarkup(row_width=1)
-    kb.add(InlineKeyboardButton("📈 RSI Buy", callback_data="param_rsi_buy"))
-    kb.add(InlineKeyboardButton("📉 RSI Sell", callback_data="param_rsi_sell"))
+    kb.add(InlineKeyboardButton("📈 RSI Buy (5m)", callback_data="param_rsi_buy"))
+    kb.add(InlineKeyboardButton("📉 RSI Sell (5m)", callback_data="param_rsi_sell"))
+    kb.add(InlineKeyboardButton("📈 RSI Buy (1m)", callback_data="param_rsi_1m_buy"))
+    kb.add(InlineKeyboardButton("📉 RSI Sell (1m)", callback_data="param_rsi_1m_sell"))
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -603,23 +682,35 @@ def settings_param_selected(call):
     target = state["target"]
 
     if param == "rsi_buy":
-        prompt_text = f"Enter new RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
+        prompt_text = f"Enter new 5m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
         if target == "all":
             prompt_text += f"Global: {DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}"
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_buy_min']}-{settings['rsi_buy_max']}"
-        param_name = "rsi_buy"
     elif param == "rsi_sell":
-        prompt_text = f"Enter new RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
+        prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
         if target == "all":
             prompt_text += f"Global: {DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}"
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
-        param_name = "rsi_sell"
+    elif param == "rsi_1m_buy":
+        prompt_text = f"Enter new 1m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
+        if target == "all":
+            prompt_text += f"Global: {DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}"
+        else:
+            settings = get_effective_settings(target)
+            prompt_text += f"{target}: {settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}"
+    elif param == "rsi_1m_sell":
+        prompt_text = f"Enter new 1m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
+        if target == "all":
+            prompt_text += f"Global: {DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}"
+        else:
+            settings = get_effective_settings(target)
+            prompt_text += f"{target}: {settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}"
 
-    state["param"] = param_name
+    state["param"] = param
     bot.edit_message_text(prompt_text, call.message.chat.id, call.message.message_id)
     msg = bot.send_message(call.message.chat.id, "Please reply with the new value:")
     bot.register_next_step_handler(msg, process_settings_value)
@@ -635,7 +726,7 @@ def process_settings_value(message):
     value = message.text.strip()
 
     try:
-        if param in ("rsi_buy", "rsi_sell"):
+        if param in ("rsi_buy", "rsi_sell", "rsi_1m_buy", "rsi_1m_sell"):
             parts = value.split('-')
             if len(parts) != 2:
                 raise ValueError("Format must be min-max")
@@ -648,10 +739,18 @@ def process_settings_value(message):
                     global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
                     DEFAULT_RSI_BUY_MIN = min_val
                     DEFAULT_RSI_BUY_MAX = max_val
-                else:
+                elif param == "rsi_sell":
                     global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
                     DEFAULT_RSI_SELL_MIN = min_val
                     DEFAULT_RSI_SELL_MAX = max_val
+                elif param == "rsi_1m_buy":
+                    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
+                    DEFAULT_RSI_1M_BUY_MIN = min_val
+                    DEFAULT_RSI_1M_BUY_MAX = max_val
+                elif param == "rsi_1m_sell":
+                    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
+                    DEFAULT_RSI_1M_SELL_MIN = min_val
+                    DEFAULT_RSI_1M_SELL_MAX = max_val
                 bot.reply_to(message, f"✅ Global {param} set to {min_val}-{max_val}")
             else:
                 if target not in pair_settings:
@@ -659,10 +758,30 @@ def process_settings_value(message):
                 if param == "rsi_buy":
                     pair_settings[target]["rsi_buy_min"] = min_val
                     pair_settings[target]["rsi_buy_max"] = max_val
-                else:
+                elif param == "rsi_sell":
                     pair_settings[target]["rsi_sell_min"] = min_val
                     pair_settings[target]["rsi_sell_max"] = max_val
+                elif param == "rsi_1m_buy":
+                    pair_settings[target]["rsi_1m_buy_min"] = min_val
+                    pair_settings[target]["rsi_1m_buy_max"] = max_val
+                elif param == "rsi_1m_sell":
+                    pair_settings[target]["rsi_1m_sell_min"] = min_val
+                    pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
+        else:
+            # Gap multiplier handling (kept for backward compatibility)
+            mult = float(value)
+            if mult <= 0 or mult > 2:
+                raise ValueError("Multiplier must be >0 and ≤2")
+            if target == "all":
+                global DEFAULT_GAP_MULTIPLIER
+                DEFAULT_GAP_MULTIPLIER = mult
+                bot.reply_to(message, f"✅ Global gap multiplier set to {mult}")
+            else:
+                if target not in pair_settings:
+                    pair_settings[target] = {}
+                pair_settings[target]["gap_multiplier"] = mult
+                bot.reply_to(message, f"✅ {target} gap multiplier set to {mult}")
     except Exception as e:
         bot.reply_to(message, f"❌ Invalid input: {e}. Please try again.")
         settings_state.pop(chat_id, None)
@@ -671,7 +790,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers (updated blocked_list to show timestamps) ---
+# --- Callback Handlers (updated for status/blocked) ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -792,7 +911,7 @@ def handle_callback(call):
                 if direction and direction != "NEUTRAL":
                     icon = "🟢" if direction == "BUY" else "🔴"
                     r = result if isinstance(result, dict) else None
-                    if r: results.append(f"{icon} {pair}: {direction} (RSI: {r['rsi_5m']:.1f})")
+                    if r: results.append(f"{icon} {pair}: {direction} (RSI5m: {r['rsi_5m']:.1f}, RSI1m: {r['rsi_1m']:.1f})")
             msg = "📊 *Quick Scan Results:*\n" + ("\n".join(results) if results else "No signals found.")
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="quick_scan"))
@@ -813,6 +932,7 @@ def handle_callback(call):
                        f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                        f"1m Diff: {result['diff_1m']:.5f}\n"
                        f"5m RSI: {result['rsi_5m']:.2f}\n"
+                       f"1m RSI: {result['rsi_1m']:.2f}\n"
                        f"Signal: {direction}")
             else:
                 msg = f"❌ Error: {result}"
@@ -849,8 +969,8 @@ def handle_callback(call):
                 msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
             else:
                 msg = "🚫 *Blocked Pairs:*\n\n"
-                for sym, blocked_since in spread_blocked_5m.items():
-                    msg += f"• {sym} — Spread (blocked since {time.strftime('%H:%M', time.localtime(blocked_since))})\n"
+                for sym, info in spread_blocked_5m.items():
+                    msg += f"• {sym} — Spread (blocked since {time.strftime('%H:%M', time.localtime(info['blocked_since']))})\n"
                 for sym, blocked in compression_blocked.items():
                     if blocked:
                         msg += f"• {sym} — MACD compression\n"
@@ -923,6 +1043,7 @@ def handle_callback(call):
                        f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                        f"1m Diff: {result['diff_1m']:.5f}\n"
                        f"5m RSI: {result['rsi_5m']:.2f}\n"
+                       f"1m RSI: {result['rsi_1m']:.2f}\n"
                        f"Signal: {direction}")
             else: msg = f"❌ Error: {result}"
             kb = InlineKeyboardMarkup().add(
@@ -996,7 +1117,7 @@ def handle_callback(call):
                 "• 💬 Chat: ask me anything\n"
                 "• 🐛 Debug: analyze a signal\n"
                 "• 🧪 Test AI: check connection\n"
-                "• ⚙️ Settings: adjust RSI\n"
+                "• ⚙️ Settings: adjust RSI (5m & 1m)\n"
                 "• 📈 Stats / ⏱️ Entry\n\n"
                 "RSI: configurable per pair"
             )
@@ -1011,7 +1132,7 @@ def handle_callback(call):
         logging.error(f"Callback error: {e}")
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
 
-# --- Old feedback reply handler ---
+# --- Old feedback reply handler (unchanged) ---
 def process_feedback_reply(message, msg_id):
     if str(message.chat.id) != CHAT_ID: return
     pending_feedback.pop(message.chat.id, None)
