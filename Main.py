@@ -813,6 +813,13 @@ def settings_param_selected(call):
     bot.answer_callback_query(call.id)
 
 def process_settings_value(message):
+    # Declare all globals at the top to avoid "assigned before global" error
+    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
+    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
+    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
+    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
+    global pair_settings
+
     chat_id = message.chat.id
     if chat_id not in settings_state:
         return
@@ -839,10 +846,6 @@ def process_settings_value(message):
             buy5m, sell5m, buy1m, sell1m = ranges
 
             if target == "all":
-                global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
-                global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
-                global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
-                global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
                 DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX = buy5m
                 DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX = sell5m
                 DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX = buy1m
@@ -858,6 +861,7 @@ def process_settings_value(message):
                     "rsi_1m_sell_min": sell1m[0], "rsi_1m_sell_max": sell1m[1]
                 })
                 bot.reply_to(message, f"✅ {target} RSI settings updated.")
+
         elif param in ("rsi_buy", "rsi_sell", "rsi_1m_buy", "rsi_1m_sell"):
             parts = value.split('-')
             if len(parts) != 2:
@@ -866,21 +870,18 @@ def process_settings_value(message):
             max_val = int(parts[1].strip())
             if min_val < 0 or min_val > 100 or max_val < 0 or max_val > 100 or min_val >= max_val:
                 raise ValueError("Invalid range")
+
             if target == "all":
                 if param == "rsi_buy":
-                    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
                     DEFAULT_RSI_BUY_MIN = min_val
                     DEFAULT_RSI_BUY_MAX = max_val
                 elif param == "rsi_sell":
-                    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
                     DEFAULT_RSI_SELL_MIN = min_val
                     DEFAULT_RSI_SELL_MAX = max_val
                 elif param == "rsi_1m_buy":
-                    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
                     DEFAULT_RSI_1M_BUY_MIN = min_val
                     DEFAULT_RSI_1M_BUY_MAX = max_val
                 elif param == "rsi_1m_sell":
-                    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
                     DEFAULT_RSI_1M_SELL_MIN = min_val
                     DEFAULT_RSI_1M_SELL_MAX = max_val
                 bot.reply_to(message, f"✅ Global {param} set to {min_val}-{max_val}")
@@ -900,6 +901,7 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_1m_sell_min"] = min_val
                     pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
+
         else:
             bot.reply_to(message, "Unknown parameter.")
     except Exception as e:
@@ -1279,7 +1281,7 @@ def handle_callback(call):
                 "RSI: configurable per pair"
             )
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-            bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            bot.edit_hereage_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
 
         else:
             logging.warning(f"Unknown callback data: {data}")
