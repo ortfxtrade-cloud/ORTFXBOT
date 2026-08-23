@@ -1616,4 +1616,4 @@ if __name__ == "__main__":
     threading.Thread(target=martingale_scheduler, daemon=True).start()
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     print(f"Bot and Web Server starting on port {port}...")
-    app.run(host="0.0.0.0", port=port)to
+    app.run(host="0.0.0.0", port=port)
