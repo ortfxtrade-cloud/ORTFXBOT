@@ -35,8 +35,8 @@ MAX_SPREAD_PIPS = float(os.environ.get("MAX_SPREAD_PIPS", "3.0"))
 UNBLOCK_CONSECUTIVE_CHECKS = int(os.environ.get("UNBLOCK_CONSECUTIVE_CHECKS", "2"))
 
 # --- IQ Option Credentials ---
-IQ_OPTION_EMAIL = os.environ.get("IQ_OPTION_EMAIL", "")
-IQ_OPTION_PASSWORD = os.environ.get("IQ_OPTION_PASSWORD", "")
+IQ_OPTION_EMAIL = "ogbarobert21@gmail.com"
+IQ_OPTION_PASSWORD = "Death2006$"
 TRADE_MODE = os.environ.get("TRADE_MODE", "demo")  # "demo" or "real"
 
 # --- Trading Parameters (fixed expiry, configurable stake) ---
