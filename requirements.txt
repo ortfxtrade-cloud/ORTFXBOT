@@ -4,4 +4,4 @@ yfinance
 pyTelegramBotAPI
 Flask
 iqoptionapi
-pocketoption-api
+git+https://github.com/Lu-Yi-Hsun/pocketoption-api.git
