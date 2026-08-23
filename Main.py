@@ -72,8 +72,11 @@ loss_interview_state = {}
 # Chat / Debug mode
 chat_mode = {}
 
-# Pending trades for manual confirmation
+# Pending trades for manual confirmation (before placement)
 pending_trades = {}  # key: msg_id, value: {"symbol":, "direction":, "stake":}
+
+# Pending trades for auto-result check (after placement)
+pending_expiry_trades = {}  # key: msg_id, value: {"symbol":, "direction":, "expiry_time":, "stake":, "msg_id":}
 
 # --- Default RSI settings (5m + 1m) ---
 DEFAULT_RSI_BUY_MIN = 30
@@ -88,9 +91,6 @@ DEFAULT_RSI_1M_SELL_MAX = 70
 
 pair_settings = {}
 settings_state = {}
-
-# --- Martingale scheduler ---
-martingale_jobs = []
 
 # --- MACD Compression Filter ---
 compression_counter = {}
@@ -133,6 +133,33 @@ def place_iq_option_trade(api, symbol, direction, amount):
         return result
     except Exception as e:
         logging.error(f"IQ Option trade error: {e}")
+        return None
+
+def check_trade_result(api, symbol, direction):
+    """
+    Try to get the result of a closed trade for the given symbol and direction.
+    Returns: "WIN" or "LOSS" if found, else None.
+    """
+    if api is None:
+        return None
+    asset = symbol.replace("=X", "")
+    try:
+        # Get closed positions from the last 10 minutes
+        if hasattr(api, 'get_position_history'):
+            positions = api.get_position_history()
+        else:
+            positions = api.get_all_open_orders()
+        if not positions:
+            return None
+        for pos in positions:
+            if pos.get('asset') == asset and pos.get('direction') == direction.lower():
+                profit = float(pos.get('profit', 0))
+                status = pos.get('status', '').lower()
+                if 'win' in status or 'closed' in status:
+                    return "WIN" if profit > 0 else "LOSS"
+        return None
+    except Exception as e:
+        logging.error(f"Error checking trade result for {symbol}: {e}")
         return None
 
 # -------------------- Persistence for Trade Settings --------------------
@@ -185,7 +212,7 @@ def get_effective_trade_settings(symbol):
     else:
         return {"stake": DEFAULT_STAKE}
 
-# -------------------- Inline Keyboards (unchanged) --------------------
+# -------------------- Inline Keyboards (with Check IQ) --------------------
 def get_main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -199,6 +226,7 @@ def get_main_menu():
         InlineKeyboardButton("🐛 Debug", callback_data="debug_start"),
         InlineKeyboardButton("🧪 Test AI", callback_data="test_ai"),
         InlineKeyboardButton("⚙️ Settings", callback_data="settings_menu"),
+        InlineKeyboardButton("🔌 Check IQ", callback_data="check_iq"),
         InlineKeyboardButton("▶️ Start Scanner", callback_data="start_scanner"),
         InlineKeyboardButton("⏸️ Pause Scanner", callback_data="pause_scanner"),
         InlineKeyboardButton("➕ Add Pair", callback_data="add_menu"),
@@ -422,9 +450,9 @@ def diagnose_pair(symbol):
     except Exception as e:
         return f"❌ Error: {e}"
 
-# -------------------- Scanner Engine (modified for manual confirmation + IQ Only) --------------------
+# -------------------- Scanner Engine (Martingale removed) --------------------
 def scanner_engine():
-    global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m, pending_trades
+    global alert_cooldowns, signal_log, full_signal_messages, compression_counter, compression_blocked, spread_blocked_5m, pending_trades
     while True:
         if STATE["running"]:
             with data_lock:
@@ -533,12 +561,9 @@ def scanner_engine():
                             flag2 = flag_map.get(parts[1], "🏳️")
                             entry_dt = df.index[-1]
                             entry_time_str = entry_dt.strftime("%H:%M")
-                            mart1 = (entry_dt + pd.Timedelta(minutes=5)).strftime("%H:%M")
-                            mart2 = (entry_dt + pd.Timedelta(minutes=10)).strftime("%H:%M")
-                            mart3 = (entry_dt + pd.Timedelta(minutes=15)).strftime("%H:%M")
-                            trigger_time = entry_dt.timestamp() + (15 * 60) + 30
                             arrow = "🟥" if direction == "SELL" else "🟩"
 
+                            # Removed Martingale timestamps (1⃣, 2⃣, 3⃣)
                             short_msg = (
                                 f"⚡ SIGNAL\n\n"
                                 f"{flag1}{flag2} {pair_display}\n"
@@ -546,11 +571,7 @@ def scanner_engine():
                                 f"⏱ Expiration: 5 minutes\n"
                                 f"⏰ Entry: {entry_time_str}\n"
                                 f"{arrow} Direction: {direction}\n"
-                                f"1m RSI: {rsi_1m_val:.2f}\n"
-                                f"📊 Martingale:\n"
-                                f"1⃣ {mart1}\n"
-                                f"2⃣ {mart2}\n"
-                                f"3⃣ {mart3}"
+                                f"1m RSI: {rsi_1m_val:.2f}"
                             )
 
                             full_msg = (
@@ -583,7 +604,7 @@ def scanner_engine():
                                 sent_msg = bot.send_message(CHAT_ID, short_msg, reply_markup=kb, parse_mode="Markdown")
                                 full_signal_messages[sent_msg.message_id] = full_msg
 
-                                # Store pending trade details
+                                # Store pending trade details (for confirmation)
                                 trade_cfg = get_effective_trade_settings(symbol)
                                 pending_trades[sent_msg.message_id] = {
                                     "symbol": symbol,
@@ -591,7 +612,7 @@ def scanner_engine():
                                     "stake": trade_cfg["stake"]
                                 }
 
-                                # Log signal
+                                # Log signal (no martingale job)
                                 log_entry = {
                                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                                     "symbol": symbol,
@@ -612,14 +633,6 @@ def scanner_engine():
                                     "result": ""
                                 }
                                 signal_log.append(log_entry)
-                                martingale_jobs.append({
-                                    "trigger_time": trigger_time,
-                                    "chat_id": CHAT_ID,
-                                    "symbol": symbol,
-                                    "direction": direction,
-                                    "entry_time": entry_time_str,
-                                    "msg_id": sent_msg.message_id
-                                })
                             except Exception as e:
                                 logging.error(f"Failed to send/log: {e}")
                             alert_cooldowns[symbol] = time.time()
@@ -631,35 +644,31 @@ def scanner_engine():
         else:
             time.sleep(5)
 
-# -------------------- Martingale Scheduler (unchanged) --------------------
-def martingale_scheduler():
-    global martingale_jobs
+# -------------------- Auto-Result Checker --------------------
+def auto_result_checker():
+    global pending_expiry_trades, signal_log
     while True:
         now = time.time()
-        due = [job for job in martingale_jobs if job["trigger_time"] <= now]
-        for job in due:
-            symbol = job["symbol"]
-            pair_display = symbol.replace("=X", "")
-            direction = job["direction"]
-            entry_time = job["entry_time"]
+        expired = []
+        for msg_id, trade in pending_expiry_trades.items():
+            if now >= trade["expiry_time"]:
+                expired.append(msg_id)
+        for msg_id in expired:
+            trade = pending_expiry_trades.pop(msg_id)
+            symbol = trade["symbol"]
+            direction = trade["direction"]
+            result = check_trade_result(iq_api, symbol, direction)
+            if result:
+                success, _ = record_feedback(msg_id, result, 0, "", "", "")
+                if success:
+                    logging.info(f"Auto-recorded {result} for {symbol} (msg {msg_id})")
+                else:
+                    logging.warning(f"Auto-record failed for {symbol} (msg {msg_id})")
+            else:
+                logging.info(f"Could not auto-check result for {symbol} (msg {msg_id}), will rely on manual feedback if any.")
+        time.sleep(30)
 
-            kb = InlineKeyboardMarkup(row_width=2)
-            kb.add(
-                InlineKeyboardButton("✅ WIN", callback_data=f"mart_win_{symbol}"),
-                InlineKeyboardButton("❌ LOSS", callback_data=f"mart_loss_{symbol}"),
-            )
-            bot.send_message(
-                job["chat_id"],
-                f"📊 Martingale series for {pair_display} completed.\n"
-                f"Direction: {direction}\n"
-                f"Entry: {entry_time}\n"
-                f"Did you win or lose?",
-                reply_markup=kb
-            )
-        martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
-        time.sleep(10)
-
-# -------------------- Feedback helpers (unchanged) --------------------
+# -------------------- Feedback helpers --------------------
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
     global pair_loss_streak, pair_entry_stats
     for entry in signal_log:
@@ -695,7 +704,7 @@ def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis="
             return True, None
     return False, None
 
-# -------------------- AI Helper (unchanged) --------------------
+# -------------------- AI Helper --------------------
 def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be concise."):
     api_key = "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ"
     try:
@@ -794,7 +803,7 @@ def process_loss_notes(message, msg_id):
 
     bot.edit_message_text(response, chat_id, thinking_msg.message_id, parse_mode="Markdown")
 
-# -------------------- Settings Handlers (modified for IQ Only) --------------------
+# -------------------- Settings Handlers --------------------
 @bot.callback_query_handler(func=lambda call: call.data == "settings_menu")
 def settings_menu(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -869,7 +878,7 @@ def settings_param_selected(call):
             prompt_text += f"{target}: {settings['stake']}"
         param_name = "stake"
     else:
-        # RSI parameters (unchanged)
+        # RSI parameters
         if param == "rsi_buy":
             prompt_text = f"Enter new 5m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
             if target == "all":
@@ -958,7 +967,7 @@ def process_settings_value(message):
             settings_state.pop(chat_id, None)
             return
 
-        # --- RSI handling (unchanged) ---
+        # --- RSI handling ---
         if param == "rsi_all":
             parts = [p.strip() for p in value.split(',')]
             if len(parts) != 4:
@@ -1042,7 +1051,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# -------------------- Main Callback Handler (updated for IQ Only) --------------------
+# -------------------- Main Callback Handler --------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -1052,6 +1061,39 @@ def handle_callback(call):
     msg_id = call.message.message_id
 
     try:
+        # --- Check IQ Option Connection ---
+        if data == "check_iq":
+            if iq_api:
+                try:
+                    balance = iq_api.get_balance()
+                    mode = "🔴 REAL" if TRADE_MODE == "real" else "🟢 DEMO"
+                    msg = (
+                        f"✅ *IQ Option Connected*\n\n"
+                        f"Mode: {mode}\n"
+                        f"Balance: ${balance:.2f}\n"
+                        f"Status: Active"
+                    )
+                except Exception as e:
+                    msg = (
+                        f"⚠️ *IQ Option Client Exists*\n"
+                        f"Connection seems alive, but balance check failed.\n"
+                        f"Error: {e}\n\n"
+                        f"Try restarting the bot."
+                    )
+            else:
+                msg = (
+                    f"❌ *IQ Option NOT Connected*\n\n"
+                    f"Possible reasons:\n"
+                    f"• Credentials not set (IQ_OPTION_EMAIL / PASSWORD)\n"
+                    f"• Library not installed (iqoptionapi)\n"
+                    f"• Invalid credentials\n"
+                    f"• Network error on startup\n\n"
+                    f"Check Render logs for details."
+                )
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
         # --- Trade Confirmation (IQ Only) ---
         if data.startswith("trade_confirm_"):
             parts = data.split("_")  # ["trade", "confirm", "symbol", "direction"]
@@ -1065,12 +1107,18 @@ def handle_callback(call):
                 stake = trade_info["stake"]
                 dir_opt = "call" if direction == "BUY" else "put"
 
-                # Place trade on IQ Option only
                 if iq_api:
                     result = place_iq_option_trade(iq_api, symbol, dir_opt, stake)
                     if result:
+                        expiry_time = time.time() + (TRADE_EXPIRATION_MINUTES * 60)
+                        pending_expiry_trades[msg_id] = {
+                            "symbol": symbol,
+                            "direction": direction,
+                            "expiry_time": expiry_time,
+                            "stake": stake,
+                            "msg_id": msg_id
+                        }
                         bot.answer_callback_query(call.id, f"✅ Trade placed for {symbol} ({direction})")
-                        # Edit message to remove buttons
                         bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
                         pending_trades.pop(msg_id, None)
                         logging.info(f"IQ Option trade placed: {symbol} {direction} stake={stake}")
@@ -1083,28 +1131,12 @@ def handle_callback(call):
         # --- Trade Cancel ---
         if data.startswith("trade_cancel_"):
             pending_trades.pop(msg_id, None)
+            pending_expiry_trades.pop(msg_id, None)
             bot.answer_callback_query(call.id, "❌ Trade cancelled.")
             bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
             return
 
-        # --- Martingale Win/Loss ---
-        if data.startswith("mart_win_") or data.startswith("mart_loss_"):
-            result = "WIN" if data.startswith("mart_win_") else "LOSS"
-            symbol = data[9:] if data.startswith("mart_win_") else data[10:]
-            for entry in reversed(signal_log):
-                if entry.get("symbol") == symbol and not entry.get("result"):
-                    record_feedback(entry["msg_id"], result)
-                    break
-            bot.answer_callback_query(call.id, f"Recorded: {result}")
-            try:
-                new_kb = InlineKeyboardMarkup()
-                new_kb.add(InlineKeyboardButton("✅ RECORDED", callback_data="none"))
-                bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=new_kb)
-            except:
-                pass
-            return
-
-        # --- Existing callbacks (unchanged) ---
+        # --- Manual Win/Loss (override) ---
         if data.startswith("win_"):
             success, extra_msg = record_feedback(msg_id, "WIN", 0)
             if success:
@@ -1137,6 +1169,7 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "Answer the question below to record loss details.")
             return
 
+        # --- Other callbacks ---
         if data.startswith("fbdetails_"):
             pending_feedback[call.message.chat.id] = msg_id
             ask_msg = bot.send_message(
@@ -1197,7 +1230,7 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, "Hiding details")
             return
 
-        # --- All other callbacks (unchanged) ---
+        # --- All remaining callbacks (unchanged) ---
         if data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
@@ -1483,7 +1516,6 @@ def handle_callback(call):
             bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             return
 
-        # If nothing matched, log warning
         logging.warning(f"Unknown callback data: {data}")
         bot.answer_callback_query(call.id, "Unknown action", show_alert=True)
 
@@ -1610,10 +1642,10 @@ def set_stake_cmd(m):
 # -------------------- Main Entry --------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
-    load_trade_settings()          # Load saved stake settings
-    init_iq_option()               # Connect to IQ Option
+    load_trade_settings()
+    init_iq_option()
     threading.Thread(target=scanner_engine, daemon=True).start()
-    threading.Thread(target=martingale_scheduler, daemon=True).start()
+    threading.Thread(target=auto_result_checker, daemon=True).start()
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     print(f"Bot and Web Server starting on port {port}...")
     app.run(host="0.0.0.0", port=port)
