@@ -4,4 +4,3 @@ yfinance
 pyTelegramBotAPI
 Flask
 iqoptionapi
-
