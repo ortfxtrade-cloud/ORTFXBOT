@@ -5,14 +5,23 @@ import random
 import threading
 import logging
 import csv
+import json
 import requests
 import pandas as pd
 import telebot
 import yfinance as yf
 from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from datetime import datetime, timedelta
 
-# --- Configuration ---
+# -------------------- IQ Option API --------------------
+try:
+    from iqoptionapi.stable_api import IQOption
+except ImportError:
+    IQOption = None
+    logging.warning("IQOption library not installed. Auto-trading disabled.")
+
+# -------------------- Configuration --------------------
 TELEGRAM_TOKEN = "8686769653:AAEUvYlVgCAv9Rn1jL82aNl6wTxk1-w7g3Q"
 CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
@@ -24,6 +33,18 @@ OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
 OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
 MAX_SPREAD_PIPS = float(os.environ.get("MAX_SPREAD_PIPS", "3.0"))
 UNBLOCK_CONSECUTIVE_CHECKS = int(os.environ.get("UNBLOCK_CONSECUTIVE_CHECKS", "2"))
+
+# --- IQ Option Credentials ---
+IQ_OPTION_EMAIL = os.environ.get("IQ_OPTION_EMAIL", "")
+IQ_OPTION_PASSWORD = os.environ.get("IQ_OPTION_PASSWORD", "")
+TRADE_MODE = os.environ.get("TRADE_MODE", "demo")  # "demo" or "real"
+
+# --- Trading Parameters (fixed expiry, configurable stake) ---
+TRADE_EXPIRATION_MINUTES = 5  # always 5 minutes
+DEFAULT_STAKE = 10.0  # USD
+
+# Per-pair overrides for stake
+pair_trade_settings = {}  # key: symbol, value: {"stake": float}
 
 # --- Global State ---
 data_lock = threading.Lock()
@@ -51,6 +72,9 @@ loss_interview_state = {}
 # Chat / Debug mode
 chat_mode = {}
 
+# Pending trades for manual confirmation
+pending_trades = {}  # key: msg_id, value: {"symbol":, "direction":, "stake":}
+
 # --- Default RSI settings (5m + 1m) ---
 DEFAULT_RSI_BUY_MIN = 30
 DEFAULT_RSI_BUY_MAX = 40
@@ -74,11 +98,63 @@ compression_blocked = {}
 
 logging.basicConfig(level=logging.INFO)
 
-@app.route('/')
-def health_check():
-    return "Bot is running!"
+# -------------------- IQ Option Client --------------------
+iq_api = None
 
-# --- Helper: get effective settings for a pair ---
+def init_iq_option():
+    global iq_api
+    if IQOption is None:
+        logging.warning("IQOption library not available. Auto-trading disabled.")
+        return
+    if not IQ_OPTION_EMAIL or not IQ_OPTION_PASSWORD:
+        logging.warning("IQ Option credentials not set. Auto-trading disabled.")
+        return
+    try:
+        iq_api = IQOption(IQ_OPTION_EMAIL, IQ_OPTION_PASSWORD)
+        iq_api.connect()
+        if TRADE_MODE == "demo":
+            iq_api.change_balance("PRACTICE")
+        else:
+            iq_api.change_balance("REAL")
+        logging.info(f"IQ Option connected in {TRADE_MODE} mode.")
+    except Exception as e:
+        logging.error(f"IQ Option connection error: {e}")
+        iq_api = None
+
+def place_iq_option_trade(api, symbol, direction, amount):
+    """Place an IQ Option trade with fixed 5-minute expiry."""
+    if api is None:
+        return None
+    asset = symbol.replace("=X", "")  # e.g., "EURUSD"
+    # Some assets may need "-OTC" suffix; adjust if needed.
+    try:
+        expiry_seconds = TRADE_EXPIRATION_MINUTES * 60
+        result = api.buy(amount, asset, direction, expiry_seconds)
+        return result
+    except Exception as e:
+        logging.error(f"IQ Option trade error: {e}")
+        return None
+
+# -------------------- Persistence for Trade Settings --------------------
+def load_trade_settings():
+    global DEFAULT_STAKE, pair_trade_settings
+    try:
+        with open("trade_settings.json", "r") as f:
+            data = json.load(f)
+            DEFAULT_STAKE = data.get("stake", DEFAULT_STAKE)
+            pair_trade_settings = data.get("pairs", {})
+    except FileNotFoundError:
+        pass
+
+def save_trade_settings():
+    data = {
+        "stake": DEFAULT_STAKE,
+        "pairs": pair_trade_settings
+    }
+    with open("trade_settings.json", "w") as f:
+        json.dump(data, f, indent=2)
+
+# -------------------- Helper: get effective settings --------------------
 def get_effective_settings(symbol):
     if symbol in pair_settings:
         return {
@@ -103,7 +179,13 @@ def get_effective_settings(symbol):
             "rsi_1m_sell_max": DEFAULT_RSI_1M_SELL_MAX
         }
 
-# --- Inline Keyboards ---
+def get_effective_trade_settings(symbol):
+    if symbol in pair_trade_settings:
+        return {"stake": pair_trade_settings[symbol].get("stake", DEFAULT_STAKE)}
+    else:
+        return {"stake": DEFAULT_STAKE}
+
+# -------------------- Inline Keyboards (unchanged) --------------------
 def get_main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -158,7 +240,7 @@ def get_add_suggestions():
     kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
     return kb
 
-# --- Spread Detection (5-Minute Flat Market – yfinance) ---
+# -------------------- Spread & Filters (unchanged) --------------------
 def is_spread_present_5m(symbol):
     try:
         ticker = yf.Ticker(symbol)
@@ -181,7 +263,6 @@ def is_spread_present_5m(symbol):
         logging.error(f"5m spread check error {symbol}: {e}")
         return False
 
-# --- OANDA Live Spread Helper ---
 def get_oanda_spread_pips(symbol):
     if not OANDA_API_KEY or not OANDA_ACCOUNT_ID:
         return None
@@ -210,7 +291,7 @@ def get_oanda_spread_pips(symbol):
         logging.error(f"OANDA spread check error {symbol}: {e}")
         return None
 
-# --- Strategy ---
+# -------------------- Strategy Functions (unchanged) --------------------
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
     slow_ema = df['Close'].ewm(span=26, adjust=False).mean()
@@ -271,7 +352,6 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Diagnose all conditions for a pair ---
 def diagnose_pair(symbol):
     try:
         df = yf.Ticker(symbol).history(period="5d", interval="5m")
@@ -292,13 +372,11 @@ def diagnose_pair(symbol):
         rsi_val = rsi.iloc[-1]
         rsi_1m_val = rsi_1m.iloc[-1]
 
-        # Spread filter
         spread_blocked = symbol in spread_blocked_5m
         if not spread_blocked:
             spread_blocked = is_spread_present_5m(symbol)
         spread_ok = not spread_blocked
 
-        # MACD compression
         hist_abs = h.abs()
         avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
         current_abs = abs(h.iloc[-1])
@@ -309,25 +387,20 @@ def diagnose_pair(symbol):
         else:
             compression_ok = not (current_abs < low_thresh and compression_counter.get(symbol, 0) >= 10)
 
-        # 5m cross
         bull_5m = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001)
         bear_5m = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001)
 
-        # 1m cross
         bull_1m = (cross_1m == 'bull')
         bear_1m = (cross_1m == 'bear')
 
-        # RSI ranges
         rsi5_buy = settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]
         rsi5_sell = settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]
         rsi1_buy = settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]
         rsi1_sell = settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]
 
-        # Cooldown
         cd = alert_cooldowns.get(symbol, 0)
         cooldown_ok = (time.time() - cd) > 300
 
-        # Build report
         pair_display = symbol.replace("=X", "")
         report = f"📋 *Conditions for {pair_display}*\n\n"
         report += f"Spread filter: {'✅' if spread_ok else '❌'}\n"
@@ -349,9 +422,9 @@ def diagnose_pair(symbol):
     except Exception as e:
         return f"❌ Error: {e}"
 
-# --- Scanner Engine ---
+# -------------------- Scanner Engine (modified for manual confirmation + IQ Only) --------------------
 def scanner_engine():
-    global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m
+    global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m, pending_trades
     while True:
         if STATE["running"]:
             with data_lock:
@@ -359,7 +432,7 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # ========== HYBRID SPREAD FILTER ==========
+                    # ----- Hybrid Spread Filter -----
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -387,15 +460,15 @@ def scanner_engine():
                             'low_spread_count': 0
                         }
                         continue
-                    # =========================================
 
+                    # ----- MACD & RSI Calculation -----
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                     m, s, h, rsi = calculate_strategy(df)
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    # ============ MACD COMPRESSION FILTER ============
+                    # ----- MACD Compression -----
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -421,8 +494,8 @@ def scanner_engine():
                                 continue
                         else:
                             compression_counter[symbol] = 0
-                    # ================================================
 
+                    # ----- 1m Data -----
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -492,17 +565,33 @@ def scanner_engine():
                                 f"Status: SAFE (Active Liquidity)"
                             )
 
+                            # ----- Build keyboard with Confirm/Cancel buttons -----
                             kb = InlineKeyboardMarkup(row_width=2)
                             kb.add(
-                                InlineKeyboardButton("🔍 More Details", callback_data=f"showdetails_"),
+                                InlineKeyboardButton("✅ Confirm Trade", callback_data=f"trade_confirm_{symbol}_{direction}"),
+                                InlineKeyboardButton("❌ Cancel", callback_data=f"trade_cancel_{symbol}_{direction}"),
+                            )
+                            kb.add(
+                                InlineKeyboardButton("🔍 More Details", callback_data="showdetails_"),
                                 InlineKeyboardButton("📋 Conditions", callback_data=f"cond_{symbol}"),
                                 InlineKeyboardButton("📊 Quick Scan", callback_data=f"quick_{symbol}"),
                                 InlineKeyboardButton("🔕 Mute 30min", callback_data=f"mute_{symbol}"),
                                 InlineKeyboardButton("❌ Remove Pair", callback_data=f"remove_{symbol}"),
                             )
+
                             try:
                                 sent_msg = bot.send_message(CHAT_ID, short_msg, reply_markup=kb, parse_mode="Markdown")
                                 full_signal_messages[sent_msg.message_id] = full_msg
+
+                                # Store pending trade details
+                                trade_cfg = get_effective_trade_settings(symbol)
+                                pending_trades[sent_msg.message_id] = {
+                                    "symbol": symbol,
+                                    "direction": direction,
+                                    "stake": trade_cfg["stake"]
+                                }
+
+                                # Log signal
                                 log_entry = {
                                     "timestamp": time.strftime("%Y-%m-%d %H:%M:%S"),
                                     "symbol": symbol,
@@ -542,7 +631,7 @@ def scanner_engine():
         else:
             time.sleep(5)
 
-# --- Martingale Scheduler ---
+# -------------------- Martingale Scheduler (unchanged) --------------------
 def martingale_scheduler():
     global martingale_jobs
     while True:
@@ -570,7 +659,7 @@ def martingale_scheduler():
         martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
         time.sleep(10)
 
-# --- Feedback helper ---
+# -------------------- Feedback helpers (unchanged) --------------------
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
     global pair_loss_streak, pair_entry_stats
     for entry in signal_log:
@@ -606,7 +695,7 @@ def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis="
             return True, None
     return False, None
 
-# --- Gemini API helper ---
+# -------------------- AI Helper (unchanged) --------------------
 def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be concise."):
     api_key = "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ"
     try:
@@ -623,7 +712,7 @@ def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be
     except Exception as e:
         return f"❌ Error: {e}"
 
-# --- Loss Interview Flow ---
+# -------------------- Loss Interview Flow (unchanged) --------------------
 def start_loss_interview(chat_id, msg_id):
     loss_interview_state[chat_id] = {"msg_id": msg_id, "step": "timing"}
     bot.send_message(chat_id, "⏱️ *When did you place the trade?*\nReply with something like: `immediately`, `30s`, `2m`, or a number in seconds.",
@@ -705,7 +794,7 @@ def process_loss_notes(message, msg_id):
 
     bot.edit_message_text(response, chat_id, thinking_msg.message_id, parse_mode="Markdown")
 
-# --- Settings Handlers ---
+# -------------------- Settings Handlers (modified for IQ Only) --------------------
 @bot.callback_query_handler(func=lambda call: call.data == "settings_menu")
 def settings_menu(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -742,6 +831,8 @@ def settings_target_selected(call):
     kb.add(InlineKeyboardButton("📈 RSI Buy (1m)", callback_data="param_rsi_1m_buy"))
     kb.add(InlineKeyboardButton("📉 RSI Sell (1m)", callback_data="param_rsi_1m_sell"))
     kb.add(InlineKeyboardButton("⚡ Enter All RSI", callback_data="param_rsi_all"))
+    kb.add(InlineKeyboardButton("💰 Stake", callback_data="param_stake"))
+    kb.add(InlineKeyboardButton("⏱️ Expiration", callback_data="param_expiration"))  # read-only
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -756,55 +847,78 @@ def settings_param_selected(call):
     state = settings_state[call.message.chat.id]
     target = state["target"]
 
-    if param == "rsi_buy":
-        prompt_text = f"Enter new 5m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_buy_min']}-{settings['rsi_buy_max']}"
-        param_name = "rsi_buy"
-    elif param == "rsi_sell":
-        prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
-        param_name = "rsi_sell"
-    elif param == "rsi_1m_buy":
-        prompt_text = f"Enter new 1m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}"
-        param_name = "rsi_1m_buy"
-    elif param == "rsi_1m_sell":
-        prompt_text = f"Enter new 1m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}"
-        param_name = "rsi_1m_sell"
-    elif param == "rsi_all":
-        if target == "all":
-            cur = (f"{DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}, "
-                   f"{DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}, "
-                   f"{DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}, "
-                   f"{DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}")
-        else:
-            settings = get_effective_settings(target)
-            cur = (f"{settings['rsi_buy_min']}-{settings['rsi_buy_max']}, "
-                   f"{settings['rsi_sell_min']}-{settings['rsi_sell_max']}, "
-                   f"{settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}, "
-                   f"{settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}")
-        prompt_text = f"Enter all four RSI ranges as: buy5m, sell5m, buy1m, sell1m\nExample: 30-40, 50-70, 30-40, 50-70\n\nCurrent:\n{cur}"
-        param_name = "rsi_all"
-    else:
-        bot.answer_callback_query(call.id, "Unknown parameter")
+    # --- Read-only Expiration ---
+    if param == "expiration":
+        bot.answer_callback_query(call.id, f"⏱️ Expiration is fixed at {TRADE_EXPIRATION_MINUTES} minutes.", show_alert=True)
+        bot.edit_message_text(
+            f"⏱️ *Expiration*\n\nThis is fixed at **{TRADE_EXPIRATION_MINUTES} minutes** and cannot be changed via settings.\n"
+            f"(You can change the constant `TRADE_EXPIRATION_MINUTES` in the code.)",
+            call.message.chat.id,
+            call.message.message_id,
+            parse_mode="Markdown"
+        )
         return
+
+    # --- Stake ---
+    if param == "stake":
+        prompt_text = f"Enter new stake amount (in USD). Current:\n"
+        if target == "all":
+            prompt_text += f"Global: {DEFAULT_STAKE}"
+        else:
+            settings = get_effective_trade_settings(target)
+            prompt_text += f"{target}: {settings['stake']}"
+        param_name = "stake"
+    else:
+        # RSI parameters (unchanged)
+        if param == "rsi_buy":
+            prompt_text = f"Enter new 5m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
+            if target == "all":
+                prompt_text += f"Global: {DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}"
+            else:
+                settings = get_effective_settings(target)
+                prompt_text += f"{target}: {settings['rsi_buy_min']}-{settings['rsi_buy_max']}"
+            param_name = "rsi_buy"
+        elif param == "rsi_sell":
+            prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
+            if target == "all":
+                prompt_text += f"Global: {DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}"
+            else:
+                settings = get_effective_settings(target)
+                prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
+            param_name = "rsi_sell"
+        elif param == "rsi_1m_buy":
+            prompt_text = f"Enter new 1m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
+            if target == "all":
+                prompt_text += f"Global: {DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}"
+            else:
+                settings = get_effective_settings(target)
+                prompt_text += f"{target}: {settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}"
+            param_name = "rsi_1m_buy"
+        elif param == "rsi_1m_sell":
+            prompt_text = f"Enter new 1m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
+            if target == "all":
+                prompt_text += f"Global: {DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}"
+            else:
+                settings = get_effective_settings(target)
+                prompt_text += f"{target}: {settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}"
+            param_name = "rsi_1m_sell"
+        elif param == "rsi_all":
+            if target == "all":
+                cur = (f"{DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}, "
+                       f"{DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}, "
+                       f"{DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}, "
+                       f"{DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}")
+            else:
+                settings = get_effective_settings(target)
+                cur = (f"{settings['rsi_buy_min']}-{settings['rsi_buy_max']}, "
+                       f"{settings['rsi_sell_min']}-{settings['rsi_sell_max']}, "
+                       f"{settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}, "
+                       f"{settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}")
+            prompt_text = f"Enter all four RSI ranges as: buy5m, sell5m, buy1m, sell1m\nExample: 30-40, 50-70, 30-40, 50-70\n\nCurrent:\n{cur}"
+            param_name = "rsi_all"
+        else:
+            bot.answer_callback_query(call.id, "Unknown parameter")
+            return
 
     state["param"] = param_name
     bot.edit_message_text(prompt_text, call.message.chat.id, call.message.message_id)
@@ -813,12 +927,11 @@ def settings_param_selected(call):
     bot.answer_callback_query(call.id)
 
 def process_settings_value(message):
-    # Declare all globals at the top to avoid "assigned before global" error
     global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
     global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
     global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
     global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
-    global pair_settings
+    global pair_settings, DEFAULT_STAKE, pair_trade_settings
 
     chat_id = message.chat.id
     if chat_id not in settings_state:
@@ -829,6 +942,23 @@ def process_settings_value(message):
     value = message.text.strip()
 
     try:
+        # --- Stake handling ---
+        if param == "stake":
+            val = float(value)
+            if val <= 0:
+                raise ValueError("Stake must be positive")
+            if target == "all":
+                DEFAULT_STAKE = val
+            else:
+                if target not in pair_trade_settings:
+                    pair_trade_settings[target] = {}
+                pair_trade_settings[target]["stake"] = val
+            save_trade_settings()
+            bot.reply_to(message, f"✅ Stake set to {val} for {target}")
+            settings_state.pop(chat_id, None)
+            return
+
+        # --- RSI handling (unchanged) ---
         if param == "rsi_all":
             parts = [p.strip() for p in value.split(',')]
             if len(parts) != 4:
@@ -912,7 +1042,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers (with Conditions) ---
+# -------------------- Main Callback Handler (updated for IQ Only) --------------------
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -920,7 +1050,44 @@ def handle_callback(call):
         return
     data = call.data
     msg_id = call.message.message_id
+
     try:
+        # --- Trade Confirmation (IQ Only) ---
+        if data.startswith("trade_confirm_"):
+            parts = data.split("_")  # ["trade", "confirm", "symbol", "direction"]
+            if len(parts) >= 4:
+                symbol = parts[2]
+                direction = parts[3]  # "BUY" or "SELL"
+                trade_info = pending_trades.get(msg_id)
+                if not trade_info:
+                    bot.answer_callback_query(call.id, "⚠️ Trade details expired or not found.", show_alert=True)
+                    return
+                stake = trade_info["stake"]
+                dir_opt = "call" if direction == "BUY" else "put"
+
+                # Place trade on IQ Option only
+                if iq_api:
+                    result = place_iq_option_trade(iq_api, symbol, dir_opt, stake)
+                    if result:
+                        bot.answer_callback_query(call.id, f"✅ Trade placed for {symbol} ({direction})")
+                        # Edit message to remove buttons
+                        bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
+                        pending_trades.pop(msg_id, None)
+                        logging.info(f"IQ Option trade placed: {symbol} {direction} stake={stake}")
+                    else:
+                        bot.answer_callback_query(call.id, "❌ Trade failed. Check logs.", show_alert=True)
+                else:
+                    bot.answer_callback_query(call.id, "❌ IQ Option not connected. Check credentials.", show_alert=True)
+            return
+
+        # --- Trade Cancel ---
+        if data.startswith("trade_cancel_"):
+            pending_trades.pop(msg_id, None)
+            bot.answer_callback_query(call.id, "❌ Trade cancelled.")
+            bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
+            return
+
+        # --- Martingale Win/Loss ---
         if data.startswith("mart_win_") or data.startswith("mart_loss_"):
             result = "WIN" if data.startswith("mart_win_") else "LOSS"
             symbol = data[9:] if data.startswith("mart_win_") else data[10:]
@@ -935,8 +1102,10 @@ def handle_callback(call):
                 bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=new_kb)
             except:
                 pass
+            return
 
-        elif data.startswith("win_"):
+        # --- Existing callbacks (unchanged) ---
+        if data.startswith("win_"):
             success, extra_msg = record_feedback(msg_id, "WIN", 0)
             if success:
                 bot.answer_callback_query(call.id, "Recorded: WIN")
@@ -961,12 +1130,14 @@ def handle_callback(call):
                     bot.send_message(call.message.chat.id, extra_msg)
             else:
                 bot.answer_callback_query(call.id, "Signal not found in log", show_alert=True)
+            return
 
-        elif data.startswith("loss_interview_"):
+        if data.startswith("loss_interview_"):
             start_loss_interview(call.message.chat.id, msg_id)
             bot.answer_callback_query(call.id, "Answer the question below to record loss details.")
+            return
 
-        elif data.startswith("fbdetails_"):
+        if data.startswith("fbdetails_"):
             pending_feedback[call.message.chat.id] = msg_id
             ask_msg = bot.send_message(
                 call.message.chat.id,
@@ -977,8 +1148,9 @@ def handle_callback(call):
             )
             bot.register_next_step_handler(ask_msg, process_feedback_reply, msg_id)
             bot.answer_callback_query(call.id, "Reply with WIN/LOSS and details...")
+            return
 
-        elif data.startswith("showdetails_") or data.startswith("hidedetails_"):
+        if data.startswith("showdetails_") or data.startswith("hidedetails_"):
             full_msg = full_signal_messages.get(msg_id)
             if not full_msg:
                 bot.answer_callback_query(call.id, "Details not available.")
@@ -1023,8 +1195,10 @@ def handle_callback(call):
                         new_kb.add(*new_row)
                 bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
                 bot.answer_callback_query(call.id, "Hiding details")
+            return
 
-        elif data == "signal_conditions":
+        # --- All other callbacks (unchanged) ---
+        if data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
                 InlineKeyboardButton("🔍 Choose from list", callback_data="cond_list"),
@@ -1034,8 +1208,9 @@ def handle_callback(call):
             bot.edit_message_text("📋 *Check Signal Conditions*\nChoose a method:", call.message.chat.id,
                                   call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
+            return
 
-        elif data == "cond_list":
+        if data == "cond_list":
             with data_lock:
                 pairs = list(STRATEGY_PAIRS)
             kb = InlineKeyboardMarkup(row_width=2)
@@ -1045,22 +1220,24 @@ def handle_callback(call):
             bot.edit_message_text("Select a pair:", call.message.chat.id, call.message.message_id,
                                   reply_markup=kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
+            return
 
-        elif data == "cond_manual":
+        if data == "cond_manual":
             msg = bot.send_message(call.message.chat.id,
                                    "Please type the pair symbol (e.g., EURUSD=X, GBPJPY=X):",
                                    parse_mode="Markdown")
             bot.register_next_step_handler(msg, process_cond_manual)
             bot.answer_callback_query(call.id)
+            return
 
-        elif data.startswith("cond_"):
+        if data.startswith("cond_"):
             pair = data[5:]
-            logging.info(f"Condition check for {pair}")
             report = diagnose_pair(pair)
             bot.send_message(call.message.chat.id, report, parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Conditions checked")
+            return
 
-        elif data == "quick_scan":
+        if data == "quick_scan":
             with data_lock: pairs = list(STRATEGY_PAIRS[:5])
             bot.send_message(call.message.chat.id, "🔍 *Quick scanning...*", parse_mode="Markdown")
             results = []
@@ -1076,10 +1253,10 @@ def handle_callback(call):
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Scan complete")
+            return
 
-        elif data.startswith("quick_") and data != "quick_scan":
+        if data.startswith("quick_") and data != "quick_scan":
             pair = data.replace("quick_", "")
-            logging.info(f"Rescan requested for {pair}")
             bot.send_message(call.message.chat.id, f"🔍 *Scanning {pair}...*", parse_mode="Markdown")
             direction, result = quick_scan_single(pair)
             if isinstance(result, dict):
@@ -1099,30 +1276,38 @@ def handle_callback(call):
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Rescan complete")
+            return
 
-        elif data == "chat_start":
+        if data == "chat_start":
             chat_mode[call.message.chat.id] = "chat"
             bot.send_message(call.message.chat.id, "💬 *Chat mode activated*\nType your message (or /cancel to exit).", parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Chat mode on")
-        elif data == "debug_start":
+            return
+
+        if data == "debug_start":
             chat_mode[call.message.chat.id] = "debug"
             bot.send_message(call.message.chat.id, "🐛 *Debug mode activated*\nPaste signal details for analysis (or /cancel to exit).", parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Debug mode on")
+            return
 
-        elif data == "test_ai":
+        if data == "test_ai":
             answer = ask_ai_core("Reply with 'AI Core is connected and ready.' Keep it very short.")
             bot.answer_callback_query(call.id, answer[:200], show_alert=True)
+            return
 
-        elif data == "main_menu":
+        if data == "main_menu":
             bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, call.message.message_id,
                                   reply_markup=get_main_menu(), parse_mode="Markdown")
-        elif data == "status":
+            return
+
+        if data == "status":
             blocked_count = len(spread_blocked_5m) + sum(compression_blocked.values())
             status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}"
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+            return
 
-        elif data == "blocked_list":
+        if data == "blocked_list":
             if not spread_blocked_5m and not any(compression_blocked.values()):
                 msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
             else:
@@ -1136,14 +1321,16 @@ def handle_callback(call):
                 InlineKeyboardButton("🔄 Refresh", callback_data="blocked_list"),
                 InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        elif data == "watchlist" or data.startswith("page_info_"):
+        if data == "watchlist" or data.startswith("page_info_"):
             page = int(data.split("_")[-1]) if data.startswith("page_info_") else 0
             with data_lock: pairs = list(STRATEGY_PAIRS)
             kb = get_pairs_keyboard(pairs, "info", page)
             bot.edit_message_text(f"📋 *Watchlist ({len(pairs)} pairs)*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        elif data == "remove_menu" or data.startswith("page_remove_"):
+        if data == "remove_menu" or data.startswith("page_remove_"):
             page = int(data.split("_")[-1]) if data.startswith("page_remove_") else 0
             with data_lock: pairs = list(STRATEGY_PAIRS)
             if not pairs:
@@ -1151,11 +1338,13 @@ def handle_callback(call):
             else:
                 kb = get_pairs_keyboard(pairs, "remove", page)
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        elif data == "add_menu":
+        if data == "add_menu":
             bot.edit_message_text("➕ *Add a pair:*\nSend /add SYMBOL or choose below:", call.message.chat.id, call.message.message_id, reply_markup=get_add_suggestions(), parse_mode="Markdown")
+            return
 
-        elif data.startswith("add_"):
+        if data.startswith("add_"):
             pair = data.replace("add_", "")
             ticker = yf.Ticker(pair)
             if len(ticker.history(period="1d")) > 0:
@@ -1164,8 +1353,9 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, f"✅ {pair} added!")
             else:
                 bot.answer_callback_query(call.id, f"❌ {pair} not found", show_alert=True)
+            return
 
-        elif data.startswith("remove_"):
+        if data.startswith("remove_"):
             pair = data.replace("remove_", "")
             with data_lock:
                 if pair in STRATEGY_PAIRS: STRATEGY_PAIRS.remove(pair)
@@ -1176,20 +1366,25 @@ def handle_callback(call):
                 bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 bot.edit_message_text("📭 No pairs left.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
+            return
 
-        elif data == "start_scanner":
+        if data == "start_scanner":
             STATE["running"] = True
             bot.answer_callback_query(call.id, "✅ Scanner started!")
-        elif data == "pause_scanner":
+            return
+
+        if data == "pause_scanner":
             STATE["running"] = False
             bot.answer_callback_query(call.id, "⏸️ Scanner paused!")
+            return
 
-        elif data.startswith("mute_"):
+        if data.startswith("mute_"):
             pair = data.replace("mute_", "")
             alert_cooldowns[pair] = time.time() + 1800
             bot.answer_callback_query(call.id, f"🔕 {pair} muted for 30 min")
+            return
 
-        elif data.startswith("info_"):
+        if data.startswith("info_"):
             pair = data.replace("info_", "")
             bot.send_message(call.message.chat.id, f"🔍 *Scanning {pair}...*", parse_mode="Markdown")
             direction, result = quick_scan_single(pair)
@@ -1209,8 +1404,9 @@ def handle_callback(call):
                 InlineKeyboardButton("🔙 Watchlist", callback_data="watchlist"))
             bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Pair info loaded")
+            return
 
-        elif data == "stats_page":
+        if data == "stats_page":
             total = len([x for x in signal_log if x.get("result")])
             wins = len([x for x in signal_log if x.get("result") == "WIN"])
             losses = len([x for x in signal_log if x.get("result") == "LOSS"])
@@ -1237,8 +1433,9 @@ def handle_callback(call):
             kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="stats_page"))
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        elif data == "entry_menu":
+        if data == "entry_menu":
             pairs_with_data = list(pair_entry_stats.keys())
             if not pairs_with_data:
                 bot.edit_message_text("No entry timing data yet.", call.message.chat.id, call.message.message_id,
@@ -1249,8 +1446,9 @@ def handle_callback(call):
                     kb.add(InlineKeyboardButton(sym, callback_data=f"entry_{sym}"))
                 kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
                 bot.edit_message_text("Select a pair to see entry timing:", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        elif data.startswith("entry_"):
+        if data.startswith("entry_"):
             symbol = data[6:]
             if symbol in pair_entry_stats:
                 stats = pair_entry_stats[symbol]
@@ -1268,30 +1466,32 @@ def handle_callback(call):
                 bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
             else:
                 bot.answer_callback_query(call.id, "No data for this pair", show_alert=True)
+            return
 
-        elif data == "help":
+        if data == "help":
             help_text = (
                 "🤖 *Forex Scanner Bot*\n\n"
                 "• 💬 Chat: ask me anything\n"
                 "• 🐛 Debug: analyze a signal\n"
                 "• 🧪 Test AI: check connection\n"
-                "• ⚙️ Settings: adjust RSI (5m & 1m)\n"
+                "• ⚙️ Settings: adjust RSI (5m & 1m), stake\n"
                 "• 📋 Conditions: live checklist\n"
                 "• 📈 Stats / ⏱️ Entry\n\n"
-                "RSI: configurable per pair"
+                "RSI and stake are configurable per pair."
             )
             kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-            bot.edit_hereage_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            return
 
-        else:
-            logging.warning(f"Unknown callback data: {data}")
-            bot.answer_callback_query(call.id, "Unknown action", show_alert=True)
+        # If nothing matched, log warning
+        logging.warning(f"Unknown callback data: {data}")
+        bot.answer_callback_query(call.id, "Unknown action", show_alert=True)
 
     except Exception as e:
         logging.error(f"Callback error: {e}")
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
 
-# --- Process manual condition check ---
+# -------------------- Process manual condition check --------------------
 def process_cond_manual(message):
     if str(message.chat.id) != CHAT_ID:
         return
@@ -1301,7 +1501,7 @@ def process_cond_manual(message):
     report = diagnose_pair(pair)
     bot.reply_to(message, report, parse_mode="Markdown")
 
-# --- Old feedback reply handler ---
+# -------------------- Old feedback reply handler --------------------
 def process_feedback_reply(message, msg_id):
     if str(message.chat.id) != CHAT_ID: return
     pending_feedback.pop(message.chat.id, None)
@@ -1346,7 +1546,7 @@ def process_feedback_reply(message, msg_id):
     else:
         bot.reply_to(message, "❌ Could not find the original signal message.")
 
-# --- Message Handlers ---
+# -------------------- Message Handlers --------------------
 @bot.message_handler(commands=['start'])
 def start(m):
     if str(m.chat.id) == CHAT_ID:
@@ -1365,6 +1565,7 @@ def cancel_chat(m):
         loss_interview_state.pop(m.chat.id, None)
         bot.reply_to(m, "❌ Mode cancelled.")
 
+# --- Loss interview handler ---
 @bot.message_handler(func=lambda m: str(m.chat.id) == CHAT_ID and m.chat.id in loss_interview_state)
 def loss_interview_handler(m):
     state = loss_interview_state.get(m.chat.id)
@@ -1374,6 +1575,7 @@ def loss_interview_handler(m):
     if step == "timing":
         process_loss_timing(m, msg_id)
 
+# --- Chat/Debug mode handler ---
 @bot.message_handler(func=lambda m: str(m.chat.id) == CHAT_ID and m.chat.id in chat_mode)
 def handle_chat_message(m):
     mode = chat_mode[m.chat.id]
@@ -1385,11 +1587,33 @@ def handle_chat_message(m):
     answer = ask_ai_core(m.text, system_prompt)
     bot.edit_message_text(answer, m.chat.id, thinking.message_id)
 
-# --- Main Entry (clean) ---
+# --- Quick commands for stake ---
+@bot.message_handler(commands=['setstake'])
+def set_stake_cmd(m):
+    if str(m.chat.id) != CHAT_ID: return
+    parts = m.text.split()
+    if len(parts) != 2:
+        bot.reply_to(m, "Usage: /setstake <amount>")
+        return
+    try:
+        val = float(parts[1])
+        if val <= 0:
+            bot.reply_to(m, "Stake must be positive.")
+            return
+        global DEFAULT_STAKE
+        DEFAULT_STAKE = val
+        save_trade_settings()
+        bot.reply_to(m, f"✅ Global stake set to {val}")
+    except ValueError:
+        bot.reply_to(m, "Invalid amount. Use a number like 10.5")
+
+# -------------------- Main Entry --------------------
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    load_trade_settings()          # Load saved stake settings
+    init_iq_option()               # Connect to IQ Option
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=martingale_scheduler, daemon=True).start()
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     print(f"Bot and Web Server starting on port {port}...")
-    app.run(host="0.0.0.0", port=port)
+    app.run(host="0.0.0.0", port=port)to
