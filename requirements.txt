@@ -1,6 +1,7 @@
-pyTelegramBotAPI
-flask
-yfinance
-pandas
-numpy
 requests
+pandas
+yfinance
+pyTelegramBotAPI
+Flask
+iqoptionapi
+pocketoption-api
