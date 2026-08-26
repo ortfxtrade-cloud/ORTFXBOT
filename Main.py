@@ -10,7 +10,6 @@ import requests
 import pandas as pd
 import telebot
 import yfinance as yf
-from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 from datetime import datetime, timedelta
 
@@ -28,25 +27,21 @@ if not TELEGRAM_TOKEN or not CHAT_ID:
     raise RuntimeError("Set TELEGRAM_TOKEN and CHAT_ID environment variables")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
-app = Flask(__name__)
-
 # --- OANDA Spread Filter Settings (Hybrid) ---
 OANDA_API_KEY = os.environ.get("OANDA_API_KEY", "")
 OANDA_ACCOUNT_ID = os.environ.get("OANDA_ACCOUNT_ID", "")
 MAX_SPREAD_PIPS = float(os.environ.get("MAX_SPREAD_PIPS", "3.0"))
 UNBLOCK_CONSECUTIVE_CHECKS = int(os.environ.get("UNBLOCK_CONSECUTIVE_CHECKS", "2"))
 
-# --- IQ Option Credentials (ALWAYS from environment variables) ---
+# --- IQ Option Credentials ---
 IQ_OPTION_EMAIL = os.environ.get("IQ_OPTION_EMAIL", "").strip()
 IQ_OPTION_PASSWORD = os.environ.get("IQ_OPTION_PASSWORD", "").strip()
-TRADE_MODE = os.environ.get("TRADE_MODE", "demo").lower().strip()  # "demo" or "real"
+TRADE_MODE = os.environ.get("TRADE_MODE", "demo").lower().strip()
 
-# --- Trading Parameters (fixed expiry, configurable stake) ---
-TRADE_EXPIRATION_MINUTES = 5  # always 5 minutes
-DEFAULT_STAKE = 10.0  # USD
-
-# Per-pair overrides for stake
-pair_trade_settings = {}  # key: symbol, value: {"stake": float}
+# --- Trading Parameters ---
+TRADE_EXPIRATION_MINUTES = 5
+DEFAULT_STAKE = 10.0
+pair_trade_settings = {}
 
 # --- Global State ---
 data_lock = threading.Lock()
@@ -60,7 +55,6 @@ STRATEGY_PAIRS = [
 ]
 STATE = {"running": True}
 alert_cooldowns = {}
-
 spread_blocked_5m = {}
 
 # Learning
@@ -71,26 +65,20 @@ pending_feedback = {}
 full_signal_messages = {}
 loss_interview_state = {}
 
-# Chat / Debug mode
 chat_mode = {}
 
-# Pending trades for manual confirmation (before placement)
-pending_trades = {}  # key: msg_id, value: {"symbol":, "direction":, "stake":}
+pending_trades = {}
+pending_expiry_trades = {}
 
-# Pending trades for auto-result check (after placement)
-pending_expiry_trades = {}  # key: msg_id, value: {"symbol":, "direction":, "expiry_time":, "stake":, "msg_id":}
-
-# --- Default RSI settings (5m + 1m) ---
+# --- Default RSI settings ---
 DEFAULT_RSI_BUY_MIN = 30
 DEFAULT_RSI_BUY_MAX = 40
 DEFAULT_RSI_SELL_MIN = 50
 DEFAULT_RSI_SELL_MAX = 70
-
 DEFAULT_RSI_1M_BUY_MIN = 30
 DEFAULT_RSI_1M_BUY_MAX = 40
 DEFAULT_RSI_1M_SELL_MIN = 50
 DEFAULT_RSI_1M_SELL_MAX = 70
-
 pair_settings = {}
 settings_state = {}
 
@@ -104,7 +92,6 @@ logging.basicConfig(level=logging.INFO)
 iq_api = None
 
 def init_iq_option():
-    """Connect using stable_api. Real forex only (no OTC)."""
     global iq_api
     if IQ_Option is None:
         logging.warning("iqoptionapi library not available. Auto-trading disabled.")
@@ -132,14 +119,10 @@ def init_iq_option():
         iq_api = None
 
 def place_iq_option_trade(api, symbol, direction, amount):
-    """Place trade on REAL forex pair only (never OTC). 5-min expiry."""
     if api is None:
         return None
-    # Real forex only — strip Yahoo / OTC suffixes
     asset = symbol.replace("=X", "").replace("-OTC", "").replace("-", "").upper()
-    # direction is already "call" or "put" from caller
     try:
-        # stable_api.buy(amount, asset, direction, duration_in_minutes)
         ok, order_id = api.buy(amount, asset, direction, TRADE_EXPIRATION_MINUTES)
         if ok:
             logging.info(f"Trade placed: {asset} {direction} stake={amount} order={order_id}")
@@ -151,10 +134,6 @@ def place_iq_option_trade(api, symbol, direction, amount):
         return None
 
 def check_trade_result(api, symbol, direction):
-    """
-    Try to get the result of a closed trade for the given symbol and direction.
-    Returns: "WIN" or "LOSS" if found, else None.
-    """
     if api is None:
         return None
     asset = symbol.replace("=X", "")
@@ -176,7 +155,7 @@ def check_trade_result(api, symbol, direction):
         logging.error(f"Error checking trade result for {symbol}: {e}")
         return None
 
-# -------------------- Persistence for Trade Settings --------------------
+# -------------------- Persistence --------------------
 def load_trade_settings():
     global DEFAULT_STAKE, pair_trade_settings
     try:
@@ -186,16 +165,21 @@ def load_trade_settings():
             pair_trade_settings = data.get("pairs", {})
     except FileNotFoundError:
         pass
+    except Exception as e:
+        logging.error(f"Error loading trade_settings.json: {e}")
 
 def save_trade_settings():
     data = {
         "stake": DEFAULT_STAKE,
         "pairs": pair_trade_settings
     }
-    with open("trade_settings.json", "w") as f:
-        json.dump(data, f, indent=2)
+    try:
+        with open("trade_settings.json", "w") as f:
+            json.dump(data, f, indent=2)
+    except Exception as e:
+        logging.error(f"Error saving trade_settings.json: {e}")
 
-# -------------------- Helper: get effective settings --------------------
+# -------------------- Helpers --------------------
 def get_effective_settings(symbol):
     if symbol in pair_settings:
         return {
@@ -226,7 +210,7 @@ def get_effective_trade_settings(symbol):
     else:
         return {"stake": DEFAULT_STAKE}
 
-# -------------------- Inline Keyboards (with Check IQ) --------------------
+# -------------------- Inline Keyboards --------------------
 def get_main_menu():
     kb = InlineKeyboardMarkup(row_width=2)
     kb.add(
@@ -333,7 +317,7 @@ def get_oanda_spread_pips(symbol):
         logging.error(f"OANDA spread check error {symbol}: {e}")
         return None
 
-# -------------------- Strategy Functions --------------------
+# -------------------- Strategy --------------------
 def calculate_strategy(df):
     fast_ema = df['Close'].ewm(span=12, adjust=False).mean()
     slow_ema = df['Close'].ewm(span=26, adjust=False).mean()
@@ -464,7 +448,7 @@ def diagnose_pair(symbol):
     except Exception as e:
         return f"❌ Error: {e}"
 
-# -------------------- Scanner Engine (Martingale removed) --------------------
+# -------------------- Scanner Engine --------------------
 def scanner_engine():
     global alert_cooldowns, signal_log, full_signal_messages, compression_counter, compression_blocked, spread_blocked_5m, pending_trades
     while True:
@@ -474,7 +458,7 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # ----- Hybrid Spread Filter -----
+                    # Hybrid spread filter
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -503,14 +487,13 @@ def scanner_engine():
                         }
                         continue
 
-                    # ----- MACD & RSI Calculation -----
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
                     m, s, h, rsi = calculate_strategy(df)
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    # ----- MACD Compression -----
+                    # MACD compression
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -537,7 +520,6 @@ def scanner_engine():
                         else:
                             compression_counter[symbol] = 0
 
-                    # ----- 1m Data -----
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
                     m_1m, s_1m, h_1m, rsi_1m = calculate_strategy(df_1m)
@@ -675,7 +657,7 @@ def auto_result_checker():
                 else:
                     logging.warning(f"Auto-record failed for {symbol} (msg {msg_id})")
             else:
-                logging.info(f"Could not auto-check result for {symbol} (msg {msg_id}), will rely on manual feedback if any.")
+                logging.info(f"Could not auto-check result for {symbol} (msg {msg_id})")
         time.sleep(30)
 
 # -------------------- Feedback helpers --------------------
@@ -716,7 +698,7 @@ def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis="
 
 # -------------------- AI Helper --------------------
 def ask_ai_core(question, system_prompt="You are a helpful trading assistant. Be concise."):
-    api_key = "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ"
+    api_key = os.environ.get("GEMINI_API_KEY", "AQ.Ab8RN6KZuaQAZUgJ9IGiVCSz2JVIHG2LJ2YiR81h1cKrddkaCQ")
     try:
         url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={api_key}"
         headers = {"Content-Type": "application/json"}
@@ -851,7 +833,6 @@ def settings_target_selected(call):
     kb.add(InlineKeyboardButton("📉 RSI Sell (1m)", callback_data="param_rsi_1m_sell"))
     kb.add(InlineKeyboardButton("⚡ Enter All RSI", callback_data="param_rsi_all"))
     kb.add(InlineKeyboardButton("💰 Stake", callback_data="param_stake"))
-    kb.add(InlineKeyboardButton("⏱️ Expiration", callback_data="param_expiration"))
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -865,17 +846,6 @@ def settings_param_selected(call):
     param = call.data[6:]
     state = settings_state[call.message.chat.id]
     target = state["target"]
-
-    if param == "expiration":
-        bot.answer_callback_query(call.id, f"⏱️ Expiration is fixed at {TRADE_EXPIRATION_MINUTES} minutes.", show_alert=True)
-        bot.edit_message_text(
-            f"⏱️ *Expiration*\n\nThis is fixed at **{TRADE_EXPIRATION_MINUTES} minutes** and cannot be changed via settings.\n"
-            f"(You can change the constant `TRADE_EXPIRATION_MINUTES` in the code.)",
-            call.message.chat.id,
-            call.message.message_id,
-            parse_mode="Markdown"
-        )
-        return
 
     if param == "stake":
         prompt_text = f"Enter new stake amount (in USD). Current:\n"
@@ -1385,7 +1355,6 @@ def handle_callback(call):
             return
 
         if data.startswith("page_"):
-            # page_{action}_{page}
             parts = data.split("_")
             if len(parts) >= 3:
                 action = parts[1]
@@ -1401,7 +1370,6 @@ def handle_callback(call):
             pair = data[5:]
             if not pair.endswith("=X") and "-" not in pair:
                 pair = pair + "=X"
-            # reuse spread block style for mute
             spread_blocked_5m[pair] = {"blocked_since": time.time(), "low_spread_count": 0}
             bot.answer_callback_query(call.id, f"Muted {pair.replace('=X','')} 30 min")
             return
@@ -1519,7 +1487,6 @@ def cancel_chat(m):
         loss_interview_state.pop(m.chat.id, None)
         bot.reply_to(m, "❌ Mode cancelled.")
 
-# --- Loss interview handler ---
 @bot.message_handler(func=lambda m: str(m.chat.id) == CHAT_ID and m.chat.id in loss_interview_state)
 def loss_interview_handler(m):
     state = loss_interview_state.get(m.chat.id)
@@ -1529,7 +1496,6 @@ def loss_interview_handler(m):
     if step == "timing":
         process_loss_timing(m, msg_id)
 
-# --- Chat/Debug mode handler ---
 @bot.message_handler(func=lambda m: str(m.chat.id) == CHAT_ID and m.chat.id in chat_mode)
 def handle_chat_message(m):
     mode = chat_mode[m.chat.id]
@@ -1541,7 +1507,6 @@ def handle_chat_message(m):
     answer = ask_ai_core(m.text, system_prompt)
     bot.edit_message_text(answer, m.chat.id, thinking.message_id)
 
-# --- Quick commands for stake ---
 @bot.message_handler(commands=['setstake'])
 def set_stake_cmd(m):
     if str(m.chat.id) != CHAT_ID: return
@@ -1563,11 +1528,8 @@ def set_stake_cmd(m):
 
 # -------------------- Main Entry --------------------
 if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 8080))
     load_trade_settings()
     init_iq_option()
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=auto_result_checker, daemon=True).start()
-    threading.Thread(target=bot.infinity_polling, daemon=True).start()
-    print(f"Bot and Web Server starting on port {port}...")
-    app.run(host="0.0.0.0", port=port)
+    bot.infinity_polling()
