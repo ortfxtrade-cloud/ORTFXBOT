@@ -28,8 +28,8 @@ except ImportError:
     logging.warning("iqoptionapi not installed. Install: pip install git+https://github.com/Lu-Yi-Hsun/iqoptionapi.git")
 
 # -------------------- Configuration --------------------
-TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
-CHAT_ID = os.environ.get("CHAT_ID", "").strip()
+TELEGRAM_TOKEN ="8686769653:AAFZRBOVmFmxEeT8pO8T4eBvrecyaooIXM8"
+CHAT_ID = "8701685996"
 if not TELEGRAM_TOKEN or not CHAT_ID:
     raise RuntimeError("Set TELEGRAM_TOKEN and CHAT_ID environment variables")
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
