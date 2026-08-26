@@ -10,8 +10,15 @@ import requests
 import pandas as pd
 import telebot
 import yfinance as yf
+from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
-from datetime import datetime, timedelta
+
+# -------------------- Flask app for Render port binding --------------------
+app = Flask(__name__)
+
+@app.route('/')
+def index():
+    return "Bot is running"
 
 # -------------------- IQ Option API --------------------
 try:
@@ -458,7 +465,6 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # Hybrid spread filter
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -493,7 +499,6 @@ def scanner_engine():
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    # MACD compression
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -638,26 +643,15 @@ def scanner_engine():
 
 # -------------------- Auto-Result Checker --------------------
 def auto_result_checker():
-    global pending_expiry_trades, signal_log
+    global pending_expiry_trades
     while True:
         now = time.time()
-        expired = []
-        for msg_id, trade in pending_expiry_trades.items():
-            if now >= trade["expiry_time"]:
-                expired.append(msg_id)
+        expired = [msg_id for msg_id, trade in pending_expiry_trades.items() if now >= trade["expiry_time"]]
         for msg_id in expired:
             trade = pending_expiry_trades.pop(msg_id)
-            symbol = trade["symbol"]
-            direction = trade["direction"]
-            result = check_trade_result(iq_api, symbol, direction)
+            result = check_trade_result(iq_api, trade["symbol"], trade["direction"])
             if result:
-                success, _ = record_feedback(msg_id, result, 0, "", "", "")
-                if success:
-                    logging.info(f"Auto-recorded {result} for {symbol} (msg {msg_id})")
-                else:
-                    logging.warning(f"Auto-record failed for {symbol} (msg {msg_id})")
-            else:
-                logging.info(f"Could not auto-check result for {symbol} (msg {msg_id})")
+                record_feedback(msg_id, result, 0, "", "", "")
         time.sleep(30)
 
 # -------------------- Feedback helpers --------------------
@@ -1015,7 +1009,6 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_1m_sell_min"] = min_val
                     pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
-
         else:
             bot.reply_to(message, "Unknown parameter.")
     except Exception as e:
@@ -1036,40 +1029,20 @@ def handle_callback(call):
     msg_id = call.message.message_id
 
     try:
-        # Check IQ Option connection
         if data == "check_iq":
             if iq_api:
                 try:
                     balance = iq_api.get_balance()
                     mode = "🔴 REAL" if TRADE_MODE == "real" else "🟢 DEMO"
-                    msg = (
-                        f"✅ *IQ Option Connected*\n\n"
-                        f"Mode: {mode}\n"
-                        f"Balance: ${balance:.2f}\n"
-                        f"Status: Active"
-                    )
+                    msg = f"✅ *IQ Option Connected*\n\nMode: {mode}\nBalance: ${balance:.2f}\nStatus: Active"
                 except Exception as e:
-                    msg = (
-                        f"⚠️ *IQ Option Client Exists*\n"
-                        f"Connection seems alive, but balance check failed.\n"
-                        f"Error: {e}\n\n"
-                        f"Try restarting the bot."
-                    )
+                    msg = f"⚠️ *IQ Option Client Exists*\nConnection seems alive, but balance check failed.\nError: {e}\n\nTry restarting the bot."
             else:
-                msg = (
-                    f"❌ *IQ Option NOT Connected*\n\n"
-                    f"Possible reasons:\n"
-                    f"• Credentials not set (IQ_OPTION_EMAIL / PASSWORD)\n"
-                    f"• Library not installed (iqoptionapi)\n"
-                    f"• Invalid credentials\n"
-                    f"• Network error on startup\n\n"
-                    f"Check Render logs for details."
-                )
+                msg = f"❌ *IQ Option NOT Connected*\n\nPossible reasons:\n• Credentials not set (IQ_OPTION_EMAIL / PASSWORD)\n• Library not installed (iqoptionapi)\n• Invalid credentials\n• Network error on startup\n\nCheck Render logs for details."
             bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
-        # Trade Confirmation
         if data.startswith("trade_confirm_"):
             parts = data.split("_")
             if len(parts) >= 4:
@@ -1103,7 +1076,6 @@ def handle_callback(call):
                     bot.answer_callback_query(call.id, "❌ IQ Option not connected. Check credentials.", show_alert=True)
             return
 
-        # Trade Cancel
         if data.startswith("trade_cancel_"):
             pending_trades.pop(msg_id, None)
             pending_expiry_trades.pop(msg_id, None)
@@ -1111,7 +1083,6 @@ def handle_callback(call):
             bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=None)
             return
 
-        # Manual Win/Loss
         if data.startswith("win_"):
             success, extra_msg = record_feedback(msg_id, "WIN", 0)
             if success:
@@ -1144,10 +1115,8 @@ def handle_callback(call):
             bot.answer_callback_query(call.id, "Answer the question below to record loss details.")
             return
 
-        # ---------- Main menu actions ----------
         if data == "main_menu":
-            bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
@@ -1168,17 +1137,14 @@ def handle_callback(call):
                 f"Expiry: {TRADE_EXPIRATION_MINUTES} min\n"
                 f"Mode: {TRADE_MODE.upper()}"
             )
-            bot.edit_message_text(msg, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text(msg, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "watchlist":
             pairs = [p.replace("=X", "") for p in STRATEGY_PAIRS]
             text = "📋 *Watchlist*\n\n" + "\n".join(f"• {p}" for p in pairs) if pairs else "Empty"
-            bot.edit_message_text(text, call.message.chat.id, msg_id,
-                                  reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="info"),
-                                  parse_mode="Markdown")
+            bot.edit_message_text(text, call.message.chat.id, msg_id, reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="info"), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
@@ -1190,16 +1156,12 @@ def handle_callback(call):
                 if v:
                     blocked.append(f"📉 {s.replace('=X','')} (compression)")
             text = "🚫 *Blocked*\n\n" + ("\n".join(blocked) if blocked else "Nothing blocked")
-            bot.edit_message_text(text, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text(text, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "signal_conditions":
-            bot.edit_message_text(
-                "📋 *Conditions*\n\nSend a pair (e.g. EURUSD) to diagnose:",
-                call.message.chat.id, msg_id, parse_mode="Markdown"
-            )
+            bot.edit_message_text("📋 *Conditions*\n\nSend a pair (e.g. EURUSD) to diagnose:", call.message.chat.id, msg_id, parse_mode="Markdown")
             msg = bot.send_message(call.message.chat.id, "Reply with the pair name:")
             bot.register_next_step_handler(msg, process_cond_manual)
             bot.answer_callback_query(call.id)
@@ -1210,44 +1172,28 @@ def handle_callback(call):
             losses = sum(1 for e in signal_log if e.get("result") == "LOSS")
             total = wins + losses
             wr = f"{100*wins/total:.1f}%" if total else "—"
-            msg = (
-                f"📈 *Stats*\n\n"
-                f"Wins: {wins}\n"
-                f"Losses: {losses}\n"
-                f"Win rate: {wr}\n"
-                f"Logged signals: {len(signal_log)}"
-            )
-            bot.edit_message_text(msg, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            msg = f"📈 *Stats*\n\nWins: {wins}\nLosses: {losses}\nWin rate: {wr}\nLogged signals: {len(signal_log)}"
+            bot.edit_message_text(msg, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "entry_menu":
             bot.edit_message_text(
-                f"⏱️ *Entry*\n\nExpiry is fixed at *{TRADE_EXPIRATION_MINUTES} minutes*.\n"
-                f"Default stake: ${DEFAULT_STAKE:.2f}\n\n"
-                f"Use Settings to change stake.",
-                call.message.chat.id, msg_id,
-                reply_markup=get_main_menu(), parse_mode="Markdown"
+                f"⏱️ *Entry*\n\nExpiry is fixed at *{TRADE_EXPIRATION_MINUTES} minutes*.\nDefault stake: ${DEFAULT_STAKE:.2f}\n\nUse Settings to change stake.",
+                call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown"
             )
             bot.answer_callback_query(call.id)
             return
 
         if data == "chat_start":
             chat_mode[call.message.chat.id] = "chat"
-            bot.edit_message_text(
-                "💬 *Chat mode*\nSend any question. /cancel to exit.",
-                call.message.chat.id, msg_id, parse_mode="Markdown"
-            )
+            bot.edit_message_text("💬 *Chat mode*\nSend any question. /cancel to exit.", call.message.chat.id, msg_id, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "debug_start":
             chat_mode[call.message.chat.id] = "debug"
-            bot.edit_message_text(
-                "🐛 *Debug mode*\nDescribe the issue. /cancel to exit.",
-                call.message.chat.id, msg_id, parse_mode="Markdown"
-            )
+            bot.edit_message_text("🐛 *Debug mode*\nDescribe the issue. /cancel to exit.", call.message.chat.id, msg_id, parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
@@ -1260,35 +1206,28 @@ def handle_callback(call):
         if data == "start_scanner":
             STATE["running"] = True
             bot.answer_callback_query(call.id, "▶️ Scanner started")
-            bot.edit_message_text("▶️ Scanner is *running*.", call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text("▶️ Scanner is *running*.", call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             return
 
         if data == "pause_scanner":
             STATE["running"] = False
             bot.answer_callback_query(call.id, "⏸️ Scanner paused")
-            bot.edit_message_text("⏸️ Scanner is *paused*.", call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text("⏸️ Scanner is *paused*.", call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             return
 
         if data == "add_menu":
-            bot.edit_message_text("➕ *Add Pair*\nPick one or type a symbol later:",
-                                  call.message.chat.id, msg_id,
-                                  reply_markup=get_add_suggestions(), parse_mode="Markdown")
+            bot.edit_message_text("➕ *Add Pair*\nPick one or type a symbol later:", call.message.chat.id, msg_id, reply_markup=get_add_suggestions(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "remove_menu":
-            bot.edit_message_text("➖ *Remove Pair*", call.message.chat.id, msg_id,
-                                  reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="remove"),
-                                  parse_mode="Markdown")
+            bot.edit_message_text("➖ *Remove Pair*", call.message.chat.id, msg_id, reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="remove"), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
         if data == "quick_scan":
             bot.answer_callback_query(call.id, "Scanning… (20–40s)")
-            bot.edit_message_text("📈 *Quick Scan* in progress…", call.message.chat.id, msg_id,
-                                  parse_mode="Markdown")
+            bot.edit_message_text("📈 *Quick Scan* in progress…", call.message.chat.id, msg_id, parse_mode="Markdown")
             found = []
             for sym in list(STRATEGY_PAIRS):
                 try:
@@ -1298,8 +1237,7 @@ def handle_callback(call):
                 except Exception:
                     pass
             text = "📈 *Quick Scan results*\n\n" + ("\n".join(found) if found else "No signals right now.")
-            bot.edit_message_text(text, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text(text, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             return
 
         if data == "help":
@@ -1313,17 +1251,14 @@ def handle_callback(call):
                 "• Strategy: 5m+1m MACD cross, dual RSI, spread + compression\n"
                 f"• Expiry: {TRADE_EXPIRATION_MINUTES} min · Stake: ${DEFAULT_STAKE:.2f}"
             )
-            bot.edit_message_text(help_text, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text(help_text, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
-        # info_PAIR / remove_PAIR / add_PAIR / page_
         if data.startswith("info_"):
             pair = data[5:]
             report = diagnose_pair(pair if pair.endswith("=X") else pair + "=X")
-            bot.edit_message_text(report, call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text(report, call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             bot.answer_callback_query(call.id)
             return
 
@@ -1336,9 +1271,7 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, f"Removed {pair.replace('=X','')}")
             else:
                 bot.answer_callback_query(call.id, "Not in list")
-            bot.edit_message_text("➖ *Remove Pair*", call.message.chat.id, msg_id,
-                                  reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="remove"),
-                                  parse_mode="Markdown")
+            bot.edit_message_text("➖ *Remove Pair*", call.message.chat.id, msg_id, reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action="remove"), parse_mode="Markdown")
             return
 
         if data.startswith("add_"):
@@ -1350,8 +1283,7 @@ def handle_callback(call):
                 bot.answer_callback_query(call.id, f"Added {pair}")
             else:
                 bot.answer_callback_query(call.id, "Already in list")
-            bot.edit_message_text("📋 *Watchlist updated*", call.message.chat.id, msg_id,
-                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.edit_message_text("📋 *Watchlist updated*", call.message.chat.id, msg_id, reply_markup=get_main_menu(), parse_mode="Markdown")
             return
 
         if data.startswith("page_"):
@@ -1359,10 +1291,7 @@ def handle_callback(call):
             if len(parts) >= 3:
                 action = parts[1]
                 page = int(parts[2])
-                bot.edit_message_reply_markup(
-                    call.message.chat.id, msg_id,
-                    reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action=action, page=page)
-                )
+                bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=get_pairs_keyboard(STRATEGY_PAIRS, action=action, page=page))
             bot.answer_callback_query(call.id)
             return
 
@@ -1472,8 +1401,7 @@ def process_feedback_reply(message, msg_id):
 @bot.message_handler(commands=['start'])
 def start(m):
     if str(m.chat.id) == CHAT_ID:
-        bot.send_message(m.chat.id, "🚀 *Forex Scanner Online*\nUse the buttons below.",
-                         reply_markup=get_main_menu(), parse_mode="Markdown")
+        bot.send_message(m.chat.id, "🚀 *Forex Scanner Online*\nUse the buttons below.", reply_markup=get_main_menu(), parse_mode="Markdown")
 
 @bot.message_handler(commands=['menu'])
 def menu_cmd(m):
@@ -1532,4 +1460,6 @@ if __name__ == "__main__":
     init_iq_option()
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=auto_result_checker, daemon=True).start()
-    bot.infinity_polling()
+    threading.Thread(target=bot.infinity_polling, daemon=True).start()
+    port = int(os.environ.get("PORT", 8080))
+    app.run(host="0.0.0.0", port=port)
