@@ -9,7 +9,7 @@ import requests
 import pandas as pd
 import telebot
 import yfinance as yf
-from flask import Flask, jsonify, request, render_template_string
+from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
@@ -65,8 +65,8 @@ DEFAULT_RSI_1M_SELL_MAX = 70
 pair_settings = {}
 settings_state = {}
 
-# --- Auto verification ---
-pending_verifications = []  # list of dicts: {signal_msg_id, symbol, direction, entry_timestamp, expiry_timestamp, chat_id}
+# --- Martingale scheduler ---
+martingale_jobs = []
 
 # --- MACD Compression Filter ---
 compression_counter = {}
@@ -292,11 +292,13 @@ def diagnose_pair(symbol):
         rsi_val = rsi.iloc[-1]
         rsi_1m_val = rsi_1m.iloc[-1]
 
+        # Spread filter
         spread_blocked = symbol in spread_blocked_5m
         if not spread_blocked:
             spread_blocked = is_spread_present_5m(symbol)
         spread_ok = not spread_blocked
 
+        # MACD compression
         hist_abs = h.abs()
         avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
         current_abs = abs(h.iloc[-1])
@@ -307,20 +309,25 @@ def diagnose_pair(symbol):
         else:
             compression_ok = not (current_abs < low_thresh and compression_counter.get(symbol, 0) >= 10)
 
+        # 5m cross
         bull_5m = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001)
         bear_5m = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001)
 
+        # 1m cross
         bull_1m = (cross_1m == 'bull')
         bear_1m = (cross_1m == 'bear')
 
+        # RSI ranges
         rsi5_buy = settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]
         rsi5_sell = settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]
         rsi1_buy = settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]
         rsi1_sell = settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]
 
+        # Cooldown
         cd = alert_cooldowns.get(symbol, 0)
         cooldown_ok = (time.time() - cd) > 300
 
+        # Build report
         pair_display = symbol.replace("=X", "")
         report = f"📋 *Conditions for {pair_display}*\n\n"
         report += f"Spread filter: {'✅' if spread_ok else '❌'}\n"
@@ -344,7 +351,7 @@ def diagnose_pair(symbol):
 
 # --- Scanner Engine ---
 def scanner_engine():
-    global alert_cooldowns, signal_log, full_signal_messages, compression_counter, compression_blocked, spread_blocked_5m
+    global alert_cooldowns, signal_log, full_signal_messages, martingale_jobs, compression_counter, compression_blocked, spread_blocked_5m
     while True:
         if STATE["running"]:
             with data_lock:
@@ -352,6 +359,7 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
+                    # ========== HYBRID SPREAD FILTER ==========
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -379,6 +387,7 @@ def scanner_engine():
                             'low_spread_count': 0
                         }
                         continue
+                    # =========================================
 
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
@@ -386,6 +395,7 @@ def scanner_engine():
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
+                    # ============ MACD COMPRESSION FILTER ============
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -411,6 +421,7 @@ def scanner_engine():
                                 continue
                         else:
                             compression_counter[symbol] = 0
+                    # ================================================
 
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
@@ -452,6 +463,7 @@ def scanner_engine():
                             mart1 = (entry_dt + pd.Timedelta(minutes=5)).strftime("%H:%M")
                             mart2 = (entry_dt + pd.Timedelta(minutes=10)).strftime("%H:%M")
                             mart3 = (entry_dt + pd.Timedelta(minutes=15)).strftime("%H:%M")
+                            trigger_time = entry_dt.timestamp() + (15 * 60) + 30
                             arrow = "🟥" if direction == "SELL" else "🟩"
 
                             short_msg = (
@@ -484,15 +496,10 @@ def scanner_engine():
                             kb.add(
                                 InlineKeyboardButton("🔍 More Details", callback_data=f"showdetails_"),
                                 InlineKeyboardButton("📋 Conditions", callback_data=f"cond_{symbol}"),
-                                InlineKeyboardButton("✅ Confirm Trade", callback_data=f"confirm_{sent_msg.message_id}") if 'sent_msg' in locals() else None,
                                 InlineKeyboardButton("📊 Quick Scan", callback_data=f"quick_{symbol}"),
                                 InlineKeyboardButton("🔕 Mute 30min", callback_data=f"mute_{symbol}"),
                                 InlineKeyboardButton("❌ Remove Pair", callback_data=f"remove_{symbol}"),
                             )
-                            # Filter out None buttons
-                            kb.keyboard = [[btn for btn in row if btn is not None] for row in kb.keyboard]
-                            kb.keyboard = [row for row in kb.keyboard if row]
-
                             try:
                                 sent_msg = bot.send_message(CHAT_ID, short_msg, reply_markup=kb, parse_mode="Markdown")
                                 full_signal_messages[sent_msg.message_id] = full_msg
@@ -516,6 +523,14 @@ def scanner_engine():
                                     "result": ""
                                 }
                                 signal_log.append(log_entry)
+                                martingale_jobs.append({
+                                    "trigger_time": trigger_time,
+                                    "chat_id": CHAT_ID,
+                                    "symbol": symbol,
+                                    "direction": direction,
+                                    "entry_time": entry_time_str,
+                                    "msg_id": sent_msg.message_id
+                                })
                             except Exception as e:
                                 logging.error(f"Failed to send/log: {e}")
                             alert_cooldowns[symbol] = time.time()
@@ -527,61 +542,33 @@ def scanner_engine():
         else:
             time.sleep(5)
 
-# --- Auto Verification Scheduler ---
-def verification_scheduler():
-    global pending_verifications
+# --- Martingale Scheduler ---
+def martingale_scheduler():
+    global martingale_jobs
     while True:
         now = time.time()
-        due = [v for v in pending_verifications if v["expiry_timestamp"] <= now]
-        for v in due:
-            verify_trade(v)
-        pending_verifications = [v for v in pending_verifications if v["expiry_timestamp"] > now]
-        time.sleep(5)
+        due = [job for job in martingale_jobs if job["trigger_time"] <= now]
+        for job in due:
+            symbol = job["symbol"]
+            pair_display = symbol.replace("=X", "")
+            direction = job["direction"]
+            entry_time = job["entry_time"]
 
-def verify_trade(v):
-    symbol = v["symbol"]
-    direction = v["direction"]
-    entry_ts = v["entry_timestamp"]
-    expiry_ts = v["expiry_timestamp"]
-    chat_id = v["chat_id"]
-    signal_msg_id = v.get("signal_msg_id")
-
-    # Fetch 1-minute data covering the period
-    start = entry_ts - 120
-    end = expiry_ts + 120
-    try:
-        ticker = yf.Ticker(symbol)
-        df = ticker.history(start=pd.to_datetime(start, unit='s'), end=pd.to_datetime(end, unit='s'), interval="1m")
-        if df.empty:
-            logging.error(f"Verification: No data for {symbol}")
-            return
-        # Get close at entry (first available >= entry_ts) and close at expiry (last <= expiry_ts)
-        df_entry = df[df.index >= pd.to_datetime(entry_ts, unit='s')]
-        df_expiry = df[df.index <= pd.to_datetime(expiry_ts, unit='s')]
-        if df_entry.empty or df_expiry.empty:
-            logging.error(f"Verification: Missing price at entry/expiry")
-            return
-        entry_price = df_entry.iloc[0]['Close']
-        expiry_price = df_expiry.iloc[-1]['Close']
-    except Exception as e:
-        logging.error(f"Verification error for {symbol}: {e}")
-        return
-
-    # Determine result
-    if direction == "BUY":
-        result = "WIN" if expiry_price > entry_price else "LOSS"
-    else:  # SELL
-        result = "WIN" if expiry_price < entry_price else "LOSS"
-
-    # Record feedback
-    success, extra = record_feedback(signal_msg_id, result, 0, "", "", f"Entry: {entry_price:.5f} -> Expiry: {expiry_price:.5f}")
-    if success:
-        msg = f"🏁 *Auto Result: {result}*\n{symbol}\nEntry: {entry_price:.5f}\nExpiry: {expiry_price:.5f}"
-        if extra:
-            msg += f"\n{extra}"
-    else:
-        msg = f"❌ Could not record result for {symbol}"
-    bot.send_message(chat_id, msg, parse_mode="Markdown")
+            kb = InlineKeyboardMarkup(row_width=2)
+            kb.add(
+                InlineKeyboardButton("✅ WIN", callback_data=f"mart_win_{symbol}"),
+                InlineKeyboardButton("❌ LOSS", callback_data=f"mart_loss_{symbol}"),
+            )
+            bot.send_message(
+                job["chat_id"],
+                f"📊 Martingale series for {pair_display} completed.\n"
+                f"Direction: {direction}\n"
+                f"Entry: {entry_time}\n"
+                f"Did you win or lose?",
+                reply_markup=kb
+            )
+        martingale_jobs = [j for j in martingale_jobs if j["trigger_time"] > now]
+        time.sleep(10)
 
 # --- Feedback helper ---
 def record_feedback(msg_id, result, delay_sec=0, reason="", notes="", analysis=""):
@@ -826,6 +813,7 @@ def settings_param_selected(call):
     bot.answer_callback_query(call.id)
 
 def process_settings_value(message):
+    # Declare all globals at the top to avoid "assigned before global" error
     global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
     global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
     global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
@@ -913,6 +901,7 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_1m_sell_min"] = min_val
                     pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
+
         else:
             bot.reply_to(message, "Unknown parameter.")
     except Exception as e:
@@ -923,7 +912,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers ---
+# --- Callback Handlers (with Conditions) ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -932,13 +921,7 @@ def handle_callback(call):
     data = call.data
     msg_id = call.message.message_id
     try:
-        if data.startswith("confirm_"):
-            signal_msg_id = int(data[8:])
-            # Ask for entry time
-            bot.send_message(call.message.chat.id, "Please enter your actual entry time (HH:MM) or type 'now':")
-            bot.register_next_step_handler_by_chat_id(call.message.chat.id, process_entry_time, signal_msg_id)
-            bot.answer_callback_query(call.id, "Entry time requested")
-        elif data.startswith("mart_win_") or data.startswith("mart_loss_"):
+        if data.startswith("mart_win_") or data.startswith("mart_loss_"):
             result = "WIN" if data.startswith("mart_win_") else "LOSS"
             symbol = data[9:] if data.startswith("mart_win_") else data[10:]
             for entry in reversed(signal_log):
@@ -953,8 +936,352 @@ def handle_callback(call):
             except:
                 pass
 
-        # ... rest of callbacks unchanged (showdetails, conditions, quick_scan, settings, etc.)
-        # For brevity, they are assumed to be present from previous full code.
+        elif data.startswith("win_"):
+            success, extra_msg = record_feedback(msg_id, "WIN", 0)
+            if success:
+                bot.answer_callback_query(call.id, "Recorded: WIN")
+                try:
+                    new_kb = InlineKeyboardMarkup(row_width=2)
+                    for row in call.message.reply_markup.keyboard:
+                        new_row = []
+                        for btn in row:
+                            if btn.callback_data.startswith("win_") or btn.callback_data.startswith("loss_interview_"):
+                                if btn.callback_data.startswith("win_"):
+                                    new_row.append(InlineKeyboardButton("✅ RECORDED", callback_data="none"))
+                                else:
+                                    new_row.append(btn)
+                            else:
+                                new_row.append(btn)
+                        if new_row:
+                            new_kb.add(*new_row)
+                    bot.edit_message_reply_markup(call.message.chat.id, msg_id, reply_markup=new_kb)
+                except:
+                    pass
+                if extra_msg:
+                    bot.send_message(call.message.chat.id, extra_msg)
+            else:
+                bot.answer_callback_query(call.id, "Signal not found in log", show_alert=True)
+
+        elif data.startswith("loss_interview_"):
+            start_loss_interview(call.message.chat.id, msg_id)
+            bot.answer_callback_query(call.id, "Answer the question below to record loss details.")
+
+        elif data.startswith("fbdetails_"):
+            pending_feedback[call.message.chat.id] = msg_id
+            ask_msg = bot.send_message(
+                call.message.chat.id,
+                "📝 Reply with the result and optional details.\n"
+                "Format: `WIN 2m reason: good entry` or `LOSS reason: spread`\n"
+                "Reply with SKIP to cancel.",
+                parse_mode="Markdown"
+            )
+            bot.register_next_step_handler(ask_msg, process_feedback_reply, msg_id)
+            bot.answer_callback_query(call.id, "Reply with WIN/LOSS and details...")
+
+        elif data.startswith("showdetails_") or data.startswith("hidedetails_"):
+            full_msg = full_signal_messages.get(msg_id)
+            if not full_msg:
+                bot.answer_callback_query(call.id, "Details not available.")
+                return
+            if data.startswith("showdetails_"):
+                new_kb = InlineKeyboardMarkup(row_width=2)
+                for row in call.message.reply_markup.keyboard:
+                    new_row = []
+                    for btn in row:
+                        if btn.callback_data.startswith("showdetails_"):
+                            new_row.append(InlineKeyboardButton("🔍 Hide Details", callback_data="hidedetails_"))
+                        elif btn.callback_data.startswith("hidedetails_"):
+                            new_row.append(InlineKeyboardButton("🔍 More Details", callback_data="showdetails_"))
+                        else:
+                            new_row.append(btn)
+                    if new_row:
+                        new_kb.add(*new_row)
+                bot.edit_message_text(full_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
+                bot.answer_callback_query(call.id, "Showing details")
+            else:
+                short_msg = None
+                for entry in signal_log:
+                    if entry.get("msg_id") == msg_id:
+                        direction = entry.get("direction", "BUY")
+                        symbol = entry.get("symbol", "")
+                        icon = "🟢" if direction == "BUY" else "🔴"
+                        short_msg = f"{icon} *{direction}* {symbol}\n\n✅ Confirmed"
+                        break
+                if not short_msg:
+                    short_msg = "Signal (tap to refresh)"
+                new_kb = InlineKeyboardMarkup(row_width=2)
+                for row in call.message.reply_markup.keyboard:
+                    new_row = []
+                    for btn in row:
+                        if btn.callback_data.startswith("hidedetails_"):
+                            new_row.append(InlineKeyboardButton("🔍 More Details", callback_data="showdetails_"))
+                        elif btn.callback_data.startswith("showdetails_"):
+                            new_row.append(InlineKeyboardButton("🔍 Hide Details", callback_data="hidedetails_"))
+                        else:
+                            new_row.append(btn)
+                    if new_row:
+                        new_kb.add(*new_row)
+                bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
+                bot.answer_callback_query(call.id, "Hiding details")
+
+        elif data == "signal_conditions":
+            kb = InlineKeyboardMarkup(row_width=1)
+            kb.add(
+                InlineKeyboardButton("🔍 Choose from list", callback_data="cond_list"),
+                InlineKeyboardButton("✏️ Enter pair manually", callback_data="cond_manual"),
+                InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")
+            )
+            bot.edit_message_text("📋 *Check Signal Conditions*\nChoose a method:", call.message.chat.id,
+                                  call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        elif data == "cond_list":
+            with data_lock:
+                pairs = list(STRATEGY_PAIRS)
+            kb = InlineKeyboardMarkup(row_width=2)
+            for pair in pairs[:10]:
+                kb.add(InlineKeyboardButton(pair, callback_data=f"cond_{pair}"))
+            kb.add(InlineKeyboardButton("🔙 Back", callback_data="signal_conditions"))
+            bot.edit_message_text("Select a pair:", call.message.chat.id, call.message.message_id,
+                                  reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+
+        elif data == "cond_manual":
+            msg = bot.send_message(call.message.chat.id,
+                                   "Please type the pair symbol (e.g., EURUSD=X, GBPJPY=X):",
+                                   parse_mode="Markdown")
+            bot.register_next_step_handler(msg, process_cond_manual)
+            bot.answer_callback_query(call.id)
+
+        elif data.startswith("cond_"):
+            pair = data[5:]
+            logging.info(f"Condition check for {pair}")
+            report = diagnose_pair(pair)
+            bot.send_message(call.message.chat.id, report, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Conditions checked")
+
+        elif data == "quick_scan":
+            with data_lock: pairs = list(STRATEGY_PAIRS[:5])
+            bot.send_message(call.message.chat.id, "🔍 *Quick scanning...*", parse_mode="Markdown")
+            results = []
+            for pair in pairs:
+                direction, result = quick_scan_single(pair)
+                if direction and direction != "NEUTRAL":
+                    icon = "🟢" if direction == "BUY" else "🔴"
+                    r = result if isinstance(result, dict) else None
+                    if r: results.append(f"{icon} {pair}: {direction} (RSI5m: {r['rsi_5m']:.1f}, RSI1m: {r['rsi_1m']:.1f})")
+            msg = "📊 *Quick Scan Results:*\n" + ("\n".join(results) if results else "No signals found.")
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="quick_scan"))
+            kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Scan complete")
+
+        elif data.startswith("quick_") and data != "quick_scan":
+            pair = data.replace("quick_", "")
+            logging.info(f"Rescan requested for {pair}")
+            bot.send_message(call.message.chat.id, f"🔍 *Scanning {pair}...*", parse_mode="Markdown")
+            direction, result = quick_scan_single(pair)
+            if isinstance(result, dict):
+                icon = {"BUY": "🟢", "SELL": "🔴"}.get(direction, "⚪")
+                msg = (f"{icon} *{pair}*\n\n"
+                       f"5m MACD: {result['macd_5m']:.5f} | Signal: {result['signal_5m']:.5f}\n"
+                       f"5m Diff: {result['diff_5m']:.5f}\n"
+                       f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
+                       f"1m Diff: {result['diff_1m']:.5f}\n"
+                       f"5m RSI: {result['rsi_5m']:.2f}\n"
+                       f"1m RSI: {result['rsi_1m']:.2f}\n"
+                       f"Signal: {direction}")
+            else:
+                msg = f"❌ Error: {result}"
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("🔄 Rescan", callback_data=f"quick_{pair}"))
+            kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Rescan complete")
+
+        elif data == "chat_start":
+            chat_mode[call.message.chat.id] = "chat"
+            bot.send_message(call.message.chat.id, "💬 *Chat mode activated*\nType your message (or /cancel to exit).", parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Chat mode on")
+        elif data == "debug_start":
+            chat_mode[call.message.chat.id] = "debug"
+            bot.send_message(call.message.chat.id, "🐛 *Debug mode activated*\nPaste signal details for analysis (or /cancel to exit).", parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Debug mode on")
+
+        elif data == "test_ai":
+            answer = ask_ai_core("Reply with 'AI Core is connected and ready.' Keep it very short.")
+            bot.answer_callback_query(call.id, answer[:200], show_alert=True)
+
+        elif data == "main_menu":
+            bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, call.message.message_id,
+                                  reply_markup=get_main_menu(), parse_mode="Markdown")
+        elif data == "status":
+            blocked_count = len(spread_blocked_5m) + sum(compression_blocked.values())
+            status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}"
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.edit_message_text(status_text, call.message.chat.id, call.message.message_id, reply_markup=kb)
+
+        elif data == "blocked_list":
+            if not spread_blocked_5m and not any(compression_blocked.values()):
+                msg = "✅ *No Blocked Pairs*\n\nAll pairs scanning normally."
+            else:
+                msg = "🚫 *Blocked Pairs:*\n\n"
+                for sym, info in spread_blocked_5m.items():
+                    msg += f"• {sym} — Spread (blocked since {time.strftime('%H:%M', time.localtime(info['blocked_since']))})\n"
+                for sym, blocked in compression_blocked.items():
+                    if blocked:
+                        msg += f"• {sym} — MACD compression\n"
+            kb = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("🔄 Refresh", callback_data="blocked_list"),
+                InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "watchlist" or data.startswith("page_info_"):
+            page = int(data.split("_")[-1]) if data.startswith("page_info_") else 0
+            with data_lock: pairs = list(STRATEGY_PAIRS)
+            kb = get_pairs_keyboard(pairs, "info", page)
+            bot.edit_message_text(f"📋 *Watchlist ({len(pairs)} pairs)*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "remove_menu" or data.startswith("page_remove_"):
+            page = int(data.split("_")[-1]) if data.startswith("page_remove_") else 0
+            with data_lock: pairs = list(STRATEGY_PAIRS)
+            if not pairs:
+                bot.edit_message_text("📭 No pairs to remove.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
+            else:
+                kb = get_pairs_keyboard(pairs, "remove", page)
+                bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "add_menu":
+            bot.edit_message_text("➕ *Add a pair:*\nSend /add SYMBOL or choose below:", call.message.chat.id, call.message.message_id, reply_markup=get_add_suggestions(), parse_mode="Markdown")
+
+        elif data.startswith("add_"):
+            pair = data.replace("add_", "")
+            ticker = yf.Ticker(pair)
+            if len(ticker.history(period="1d")) > 0:
+                with data_lock:
+                    if pair not in STRATEGY_PAIRS: STRATEGY_PAIRS.append(pair)
+                bot.answer_callback_query(call.id, f"✅ {pair} added!")
+            else:
+                bot.answer_callback_query(call.id, f"❌ {pair} not found", show_alert=True)
+
+        elif data.startswith("remove_"):
+            pair = data.replace("remove_", "")
+            with data_lock:
+                if pair in STRATEGY_PAIRS: STRATEGY_PAIRS.remove(pair)
+            bot.answer_callback_query(call.id, f"🗑️ {pair} removed!")
+            with data_lock: pairs = list(STRATEGY_PAIRS)
+            kb = get_pairs_keyboard(pairs, "remove", 0) if pairs else None
+            if kb:
+                bot.edit_message_text("❌ *Select pair to remove:*", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            else:
+                bot.edit_message_text("📭 No pairs left.", call.message.chat.id, call.message.message_id, reply_markup=get_main_menu())
+
+        elif data == "start_scanner":
+            STATE["running"] = True
+            bot.answer_callback_query(call.id, "✅ Scanner started!")
+        elif data == "pause_scanner":
+            STATE["running"] = False
+            bot.answer_callback_query(call.id, "⏸️ Scanner paused!")
+
+        elif data.startswith("mute_"):
+            pair = data.replace("mute_", "")
+            alert_cooldowns[pair] = time.time() + 1800
+            bot.answer_callback_query(call.id, f"🔕 {pair} muted for 30 min")
+
+        elif data.startswith("info_"):
+            pair = data.replace("info_", "")
+            bot.send_message(call.message.chat.id, f"🔍 *Scanning {pair}...*", parse_mode="Markdown")
+            direction, result = quick_scan_single(pair)
+            if isinstance(result, dict):
+                icon = {"BUY": "🟢", "SELL": "🔴"}.get(direction, "⚪")
+                msg = (f"{icon} *{pair}*\n\n"
+                       f"5m MACD: {result['macd_5m']:.5f} | Signal: {result['signal_5m']:.5f}\n"
+                       f"5m Diff: {result['diff_5m']:.5f}\n"
+                       f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
+                       f"1m Diff: {result['diff_1m']:.5f}\n"
+                       f"5m RSI: {result['rsi_5m']:.2f}\n"
+                       f"1m RSI: {result['rsi_1m']:.2f}\n"
+                       f"Signal: {direction}")
+            else: msg = f"❌ Error: {result}"
+            kb = InlineKeyboardMarkup().add(
+                InlineKeyboardButton("🔄 Refresh", callback_data=f"info_{pair}"),
+                InlineKeyboardButton("🔙 Watchlist", callback_data="watchlist"))
+            bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
+            bot.answer_callback_query(call.id, "Pair info loaded")
+
+        elif data == "stats_page":
+            total = len([x for x in signal_log if x.get("result")])
+            wins = len([x for x in signal_log if x.get("result") == "WIN"])
+            losses = len([x for x in signal_log if x.get("result") == "LOSS"])
+            win_rate = (wins / total * 100) if total > 0 else 0
+            msg = (f"📊 *Statistics*\n"
+                   f"Total: {total} | Wins: {wins} | Losses: {losses}\n"
+                   f"Win rate: {win_rate:.1f}%\n\n"
+                   f"*Avg Win Entry Delay:*\n")
+            for sym, stats in pair_entry_stats.items():
+                if stats["wins"]:
+                    avg = sum(stats["wins"])/len(stats["wins"])
+                    msg += f"• {sym}: {avg:.1f}s\n"
+            if not pair_entry_stats: msg += "No data yet\n"
+            reason_counts = {}
+            for entry in signal_log:
+                if entry.get("result") == "LOSS" and entry.get("loss_reason"):
+                    r = entry["loss_reason"]
+                    reason_counts[r] = reason_counts.get(r, 0) + 1
+            if reason_counts:
+                msg += "\n*Top Loss Reasons:*\n"
+                for r, cnt in sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    msg += f"• {r}: {cnt}\n"
+            kb = InlineKeyboardMarkup()
+            kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="stats_page"))
+            kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data == "entry_menu":
+            pairs_with_data = list(pair_entry_stats.keys())
+            if not pairs_with_data:
+                bot.edit_message_text("No entry timing data yet.", call.message.chat.id, call.message.message_id,
+                                      reply_markup=InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu")), parse_mode="Markdown")
+            else:
+                kb = InlineKeyboardMarkup(row_width=2)
+                for sym in pairs_with_data:
+                    kb.add(InlineKeyboardButton(sym, callback_data=f"entry_{sym}"))
+                kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+                bot.edit_message_text("Select a pair to see entry timing:", call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+
+        elif data.startswith("entry_"):
+            symbol = data[6:]
+            if symbol in pair_entry_stats:
+                stats = pair_entry_stats[symbol]
+                wins = stats["wins"]
+                losses = stats["losses"]
+                avg_win = sum(wins)/len(wins) if wins else 0
+                avg_loss = sum(losses)/len(losses) if losses else 0
+                msg = f"📈 *Entry Timing: {symbol}*\n"
+                msg += f"✅ Wins: {len(wins)} | Avg delay: {avg_win:.1f}s\n"
+                msg += f"❌ Losses: {len(losses)} | Avg delay: {avg_loss:.1f}s\n\n"
+                if wins: msg += f"Best entry: {avg_win:.1f}s after signal"
+                kb = InlineKeyboardMarkup()
+                kb.add(InlineKeyboardButton("🔙 Entry Menu", callback_data="entry_menu"))
+                kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+                bot.edit_message_text(msg, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
+            else:
+                bot.answer_callback_query(call.id, "No data for this pair", show_alert=True)
+
+        elif data == "help":
+            help_text = (
+                "🤖 *Forex Scanner Bot*\n\n"
+                "• 💬 Chat: ask me anything\n"
+                "• 🐛 Debug: analyze a signal\n"
+                "• 🧪 Test AI: check connection\n"
+                "• ⚙️ Settings: adjust RSI (5m & 1m)\n"
+                "• 📋 Conditions: live checklist\n"
+                "• 📈 Stats / ⏱️ Entry\n\n"
+                "RSI: configurable per pair"
+            )
+            kb = InlineKeyboardMarkup().add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
+            bot.edit_message_text(help_text, call.message.chat.id, call.message.message_id, reply_markup=kb, parse_mode="Markdown")
 
         else:
             logging.warning(f"Unknown callback data: {data}")
@@ -964,49 +1291,17 @@ def handle_callback(call):
         logging.error(f"Callback error: {e}")
         bot.answer_callback_query(call.id, f"Error: {e}", show_alert=True)
 
-def process_entry_time(message, signal_msg_id):
-    chat_id = message.chat.id
-    text = message.text.strip().lower()
-    now = time.time()
-    if text == "now":
-        entry_timestamp = now
-    else:
-        try:
-            # Parse HH:MM (assume today)
-            t = time.strptime(text, "%H:%M")
-            entry_dt = pd.Timestamp.now().replace(hour=t.tm_hour, minute=t.tm_min, second=0, microsecond=0)
-            entry_timestamp = entry_dt.timestamp()
-            if entry_timestamp > now:
-                # If time in future, assume yesterday? Better assume tomorrow? We'll just use today, but if future, adjust by subtracting day.
-                entry_timestamp -= 86400
-        except Exception as e:
-            bot.reply_to(message, "❌ Invalid time format. Use HH:MM (24h).")
-            return
-
-    # Find signal entry to get symbol and direction
-    signal_entry = None
-    for e in signal_log:
-        if e.get("msg_id") == signal_msg_id:
-            signal_entry = e
-            break
-    if not signal_entry:
-        bot.reply_to(message, "❌ Signal not found.")
+# --- Process manual condition check ---
+def process_cond_manual(message):
+    if str(message.chat.id) != CHAT_ID:
         return
+    pair = message.text.strip().upper()
+    if "=X" not in pair:
+        pair += "=X"
+    report = diagnose_pair(pair)
+    bot.reply_to(message, report, parse_mode="Markdown")
 
-    expiry_timestamp = entry_timestamp + 300  # 5 minutes expiry
-
-    pending_verifications.append({
-        "signal_msg_id": signal_msg_id,
-        "symbol": signal_entry["symbol"],
-        "direction": signal_entry["direction"],
-        "entry_timestamp": entry_timestamp,
-        "expiry_timestamp": expiry_timestamp,
-        "chat_id": chat_id
-    })
-
-    bot.reply_to(message, f"✅ Trade confirmed. Entry: {time.strftime('%H:%M', time.localtime(entry_timestamp))}, Expiry: {time.strftime('%H:%M', time.localtime(expiry_timestamp))}. Result will be auto-checked.")
-
-# --- Old feedback reply handler (unchanged) ---
+# --- Old feedback reply handler ---
 def process_feedback_reply(message, msg_id):
     if str(message.chat.id) != CHAT_ID: return
     pending_feedback.pop(message.chat.id, None)
@@ -1051,7 +1346,7 @@ def process_feedback_reply(message, msg_id):
     else:
         bot.reply_to(message, "❌ Could not find the original signal message.")
 
-# --- Message Handlers (unchanged) ---
+# --- Message Handlers ---
 @bot.message_handler(commands=['start'])
 def start(m):
     if str(m.chat.id) == CHAT_ID:
@@ -1090,107 +1385,11 @@ def handle_chat_message(m):
     answer = ask_ai_core(m.text, system_prompt)
     bot.edit_message_text(answer, m.chat.id, thinking.message_id)
 
-# --- API Endpoints (unchanged) ---
-@app.route('/api/status', methods=['GET'])
-def api_status():
-    return jsonify({
-        "running": STATE["running"],
-        "pairs": len(STRATEGY_PAIRS),
-        "blocked": len(spread_blocked_5m) + sum(compression_blocked.values())
-    })
-
-@app.route('/api/signals', methods=['GET'])
-def api_signals():
-    recent = signal_log[-20:][::-1]
-    return jsonify(recent)
-
-@app.route('/api/settings', methods=['GET'])
-def api_settings():
-    return jsonify({
-        "defaults": {
-            "rsi_buy": [DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX],
-            "rsi_sell": [DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX],
-            "rsi_1m_buy": [DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX],
-            "rsi_1m_sell": [DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX]
-        },
-        "per_pair": pair_settings
-    })
-
-@app.route('/api/conditions', methods=['GET'])
-def api_conditions():
-    pair = request.args.get('pair', 'EURUSD=X')
-    report = diagnose_pair(pair)
-    return jsonify({"pair": pair, "report": report})
-
-# --- Dashboard (unchanged) ---
-@app.route('/dashboard')
-def dashboard():
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <title>Forex Bot Dashboard</title>
-        <style>
-            body { font-family: Arial; background: #111; color: #eee; margin: 20px; }
-            button { background: #007bff; color: white; border: none; padding: 10px 20px; margin: 5px; border-radius: 5px; }
-            .card { background: #222; padding: 15px; margin: 10px 0; border-radius: 8px; }
-        </style>
-    </head>
-    <body>
-        <h1>Forex Bot Dashboard</h1>
-        <div class="card">
-            <h2>Status</h2>
-            <p id="status"></p>
-        </div>
-        <div class="card">
-            <h2>Recent Signals</h2>
-            <ul id="signals"></ul>
-        </div>
-        <div class="card">
-            <h2>Check Pair Conditions</h2>
-            <input type="text" id="pairInput" placeholder="EURUSD=X">
-            <button onclick="checkConditions()">Check</button>
-            <pre id="condResult"></pre>
-        </div>
-
-        <script>
-            async function loadStatus() {
-                const res = await fetch('/api/status');
-                const data = await res.json();
-                document.getElementById('status').innerText = JSON.stringify(data);
-            }
-            async function loadSignals() {
-                const res = await fetch('/api/signals');
-                const data = await res.json();
-                const list = document.getElementById('signals');
-                list.innerHTML = '';
-                data.forEach(sig => {
-                    const li = document.createElement('li');
-                    li.textContent = `${sig.timestamp} ${sig.symbol} ${sig.direction} RSI: ${sig.rsi_5m?.toFixed(2)} / ${sig.rsi_1m?.toFixed(2)}`;
-                    list.appendChild(li);
-                });
-            }
-            async function checkConditions() {
-                const pair = document.getElementById('pairInput').value;
-                const res = await fetch(`/api/conditions?pair=${pair}`);
-                const data = await res.json();
-                document.getElementById('condResult').innerText = data.report;
-            }
-            loadStatus();
-            loadSignals();
-            setInterval(loadStatus, 10000);
-            setInterval(loadSignals, 30000);
-        </script>
-    </body>
-    </html>
-    """
-    return render_template_string(html)
-
-# --- Main Entry ---
+# --- Main Entry (clean) ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     threading.Thread(target=scanner_engine, daemon=True).start()
-    threading.Thread(target=verification_scheduler, daemon=True).start()
+    threading.Thread(target=martingale_scheduler, daemon=True).start()
     threading.Thread(target=bot.infinity_polling, daemon=True).start()
     print(f"Bot and Web Server starting on port {port}...")
     app.run(host="0.0.0.0", port=port)
