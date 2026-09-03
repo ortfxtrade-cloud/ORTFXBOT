@@ -13,7 +13,8 @@ from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAH8I4FGZkU_VYpyan4Ip0kd1D7seV4A7-I"
+TELEGRAM_TOKEN = "
+8686769653:AAFzWlFiHb1umHbVYMjjQA8QZkmZDPp6x6o"
 CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
@@ -54,13 +55,13 @@ chat_mode = {}
 # --- Default RSI settings (5m + 1m) ---
 DEFAULT_RSI_BUY_MIN = 30
 DEFAULT_RSI_BUY_MAX = 40
-DEFAULT_RSI_SELL_MIN = 60
+DEFAULT_RSI_SELL_MIN = 50
 DEFAULT_RSI_SELL_MAX = 70
 
-DEFAULT_RSI_1M_BUY_MIN = 55
-DEFAULT_RSI_1M_BUY_MAX = 70
-DEFAULT_RSI_1M_SELL_MIN = 30
-DEFAULT_RSI_1M_SELL_MAX = 45
+DEFAULT_RSI_1M_BUY_MIN = 30
+DEFAULT_RSI_1M_BUY_MAX = 40
+DEFAULT_RSI_1M_SELL_MIN = 50
+DEFAULT_RSI_1M_SELL_MAX = 70
 
 pair_settings = {}
 settings_state = {}
@@ -271,8 +272,9 @@ def quick_scan_single(symbol):
     except Exception as e:
         return None, str(e)
 
-# --- Diagnose all conditions for a pair ---
+# --- NEW: Diagnose all conditions for a pair ---
 def diagnose_pair(symbol):
+    """Check all signal conditions and return a status message."""
     try:
         df = yf.Ticker(symbol).history(period="5d", interval="5m")
         if len(df) < 50:
@@ -741,7 +743,6 @@ def settings_target_selected(call):
     kb.add(InlineKeyboardButton("📉 RSI Sell (5m)", callback_data="param_rsi_sell"))
     kb.add(InlineKeyboardButton("📈 RSI Buy (1m)", callback_data="param_rsi_1m_buy"))
     kb.add(InlineKeyboardButton("📉 RSI Sell (1m)", callback_data="param_rsi_1m_sell"))
-    kb.add(InlineKeyboardButton("⚡ Enter All RSI", callback_data="param_rsi_all"))
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -763,7 +764,6 @@ def settings_param_selected(call):
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_buy_min']}-{settings['rsi_buy_max']}"
-        param_name = "rsi_buy"
     elif param == "rsi_sell":
         prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
         if target == "all":
@@ -771,7 +771,6 @@ def settings_param_selected(call):
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
-        param_name = "rsi_sell"
     elif param == "rsi_1m_buy":
         prompt_text = f"Enter new 1m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
         if target == "all":
@@ -779,7 +778,6 @@ def settings_param_selected(call):
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}"
-        param_name = "rsi_1m_buy"
     elif param == "rsi_1m_sell":
         prompt_text = f"Enter new 1m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
         if target == "all":
@@ -787,39 +785,14 @@ def settings_param_selected(call):
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}"
-        param_name = "rsi_1m_sell"
-    elif param == "rsi_all":
-        if target == "all":
-            cur = (f"{DEFAULT_RSI_BUY_MIN}-{DEFAULT_RSI_BUY_MAX}, "
-                   f"{DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}, "
-                   f"{DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}, "
-                   f"{DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}")
-        else:
-            settings = get_effective_settings(target)
-            cur = (f"{settings['rsi_buy_min']}-{settings['rsi_buy_max']}, "
-                   f"{settings['rsi_sell_min']}-{settings['rsi_sell_max']}, "
-                   f"{settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}, "
-                   f"{settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}")
-        prompt_text = f"Enter all four RSI ranges as: buy5m, sell5m, buy1m, sell1m\nExample: 30-40, 50-70, 30-40, 50-70\n\nCurrent:\n{cur}"
-        param_name = "rsi_all"
-    else:
-        bot.answer_callback_query(call.id, "Unknown parameter")
-        return
 
-    state["param"] = param_name
+    state["param"] = param
     bot.edit_message_text(prompt_text, call.message.chat.id, call.message.message_id)
     msg = bot.send_message(call.message.chat.id, "Please reply with the new value:")
     bot.register_next_step_handler(msg, process_settings_value)
     bot.answer_callback_query(call.id)
 
 def process_settings_value(message):
-    # Declare all globals at the top to avoid "assigned before global" error
-    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
-    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
-    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
-    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
-    global pair_settings
-
     chat_id = message.chat.id
     if chat_id not in settings_state:
         return
@@ -829,40 +802,7 @@ def process_settings_value(message):
     value = message.text.strip()
 
     try:
-        if param == "rsi_all":
-            parts = [p.strip() for p in value.split(',')]
-            if len(parts) != 4:
-                raise ValueError("Please provide 4 ranges separated by commas")
-            ranges = []
-            for p in parts:
-                minmax = p.split('-')
-                if len(minmax) != 2:
-                    raise ValueError("Each range must be min-max")
-                mn = int(minmax[0].strip())
-                mx = int(minmax[1].strip())
-                if mn < 0 or mn > 100 or mx < 0 or mx > 100 or mn >= mx:
-                    raise ValueError("Invalid range")
-                ranges.append((mn, mx))
-            buy5m, sell5m, buy1m, sell1m = ranges
-
-            if target == "all":
-                DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX = buy5m
-                DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX = sell5m
-                DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX = buy1m
-                DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX = sell1m
-                bot.reply_to(message, "✅ Global RSI settings updated.")
-            else:
-                if target not in pair_settings:
-                    pair_settings[target] = {}
-                pair_settings[target].update({
-                    "rsi_buy_min": buy5m[0], "rsi_buy_max": buy5m[1],
-                    "rsi_sell_min": sell5m[0], "rsi_sell_max": sell5m[1],
-                    "rsi_1m_buy_min": buy1m[0], "rsi_1m_buy_max": buy1m[1],
-                    "rsi_1m_sell_min": sell1m[0], "rsi_1m_sell_max": sell1m[1]
-                })
-                bot.reply_to(message, f"✅ {target} RSI settings updated.")
-
-        elif param in ("rsi_buy", "rsi_sell", "rsi_1m_buy", "rsi_1m_sell"):
+        if param in ("rsi_buy", "rsi_sell", "rsi_1m_buy", "rsi_1m_sell"):
             parts = value.split('-')
             if len(parts) != 2:
                 raise ValueError("Format must be min-max")
@@ -870,18 +810,21 @@ def process_settings_value(message):
             max_val = int(parts[1].strip())
             if min_val < 0 or min_val > 100 or max_val < 0 or max_val > 100 or min_val >= max_val:
                 raise ValueError("Invalid range")
-
             if target == "all":
                 if param == "rsi_buy":
+                    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
                     DEFAULT_RSI_BUY_MIN = min_val
                     DEFAULT_RSI_BUY_MAX = max_val
                 elif param == "rsi_sell":
+                    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
                     DEFAULT_RSI_SELL_MIN = min_val
                     DEFAULT_RSI_SELL_MAX = max_val
                 elif param == "rsi_1m_buy":
+                    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
                     DEFAULT_RSI_1M_BUY_MIN = min_val
                     DEFAULT_RSI_1M_BUY_MAX = max_val
                 elif param == "rsi_1m_sell":
+                    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
                     DEFAULT_RSI_1M_SELL_MIN = min_val
                     DEFAULT_RSI_1M_SELL_MAX = max_val
                 bot.reply_to(message, f"✅ Global {param} set to {min_val}-{max_val}")
@@ -901,7 +844,6 @@ def process_settings_value(message):
                     pair_settings[target]["rsi_1m_sell_min"] = min_val
                     pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
-
         else:
             bot.reply_to(message, "Unknown parameter.")
     except Exception as e:
@@ -1024,6 +966,7 @@ def handle_callback(call):
                 bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
                 bot.answer_callback_query(call.id, "Hiding details")
 
+        # NEW: Conditions menu flow
         elif data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
@@ -1039,7 +982,7 @@ def handle_callback(call):
             with data_lock:
                 pairs = list(STRATEGY_PAIRS)
             kb = InlineKeyboardMarkup(row_width=2)
-            for pair in pairs[:10]:
+            for pair in pairs[:10]:   # first 10 pairs for simplicity
                 kb.add(InlineKeyboardButton(pair, callback_data=f"cond_{pair}"))
             kb.add(InlineKeyboardButton("🔙 Back", callback_data="signal_conditions"))
             bot.edit_message_text("Select a pair:", call.message.chat.id, call.message.message_id,
@@ -1296,6 +1239,7 @@ def process_cond_manual(message):
     if str(message.chat.id) != CHAT_ID:
         return
     pair = message.text.strip().upper()
+    # Validate if pair exists or try with =X
     if "=X" not in pair:
         pair += "=X"
     report = diagnose_pair(pair)
