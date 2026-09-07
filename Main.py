@@ -53,8 +53,8 @@ chat_mode = {}
 
 # --- Default RSI settings (5m only) ---
 DEFAULT_RSI_BUY_MIN = 30
-DEFAULT_RSI_BUY_MAX = 45
-DEFAULT_RSI_SELL_MIN = 55
+DEFAULT_RSI_BUY_MAX = 40
+DEFAULT_RSI_SELL_MIN = 60
 DEFAULT_RSI_SELL_MAX = 70
 
 pair_settings = {}
