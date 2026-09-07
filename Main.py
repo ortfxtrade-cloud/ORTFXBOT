@@ -51,16 +51,11 @@ loss_interview_state = {}
 # Chat / Debug mode
 chat_mode = {}
 
-# --- Default RSI settings (5m + 1m) ---
+# --- Default RSI settings (5m only) ---
 DEFAULT_RSI_BUY_MIN = 30
 DEFAULT_RSI_BUY_MAX = 40
 DEFAULT_RSI_SELL_MIN = 50
 DEFAULT_RSI_SELL_MAX = 70
-
-DEFAULT_RSI_1M_BUY_MIN = 30
-DEFAULT_RSI_1M_BUY_MAX = 40
-DEFAULT_RSI_1M_SELL_MIN = 50
-DEFAULT_RSI_1M_SELL_MAX = 70
 
 pair_settings = {}
 settings_state = {}
@@ -85,22 +80,14 @@ def get_effective_settings(symbol):
             "rsi_buy_min": pair_settings[symbol].get("rsi_buy_min", DEFAULT_RSI_BUY_MIN),
             "rsi_buy_max": pair_settings[symbol].get("rsi_buy_max", DEFAULT_RSI_BUY_MAX),
             "rsi_sell_min": pair_settings[symbol].get("rsi_sell_min", DEFAULT_RSI_SELL_MIN),
-            "rsi_sell_max": pair_settings[symbol].get("rsi_sell_max", DEFAULT_RSI_SELL_MAX),
-            "rsi_1m_buy_min": pair_settings[symbol].get("rsi_1m_buy_min", DEFAULT_RSI_1M_BUY_MIN),
-            "rsi_1m_buy_max": pair_settings[symbol].get("rsi_1m_buy_max", DEFAULT_RSI_1M_BUY_MAX),
-            "rsi_1m_sell_min": pair_settings[symbol].get("rsi_1m_sell_min", DEFAULT_RSI_1M_SELL_MIN),
-            "rsi_1m_sell_max": pair_settings[symbol].get("rsi_1m_sell_max", DEFAULT_RSI_1M_SELL_MAX)
+            "rsi_sell_max": pair_settings[symbol].get("rsi_sell_max", DEFAULT_RSI_SELL_MAX)
         }
     else:
         return {
             "rsi_buy_min": DEFAULT_RSI_BUY_MIN,
             "rsi_buy_max": DEFAULT_RSI_BUY_MAX,
             "rsi_sell_min": DEFAULT_RSI_SELL_MIN,
-            "rsi_sell_max": DEFAULT_RSI_SELL_MAX,
-            "rsi_1m_buy_min": DEFAULT_RSI_1M_BUY_MIN,
-            "rsi_1m_buy_max": DEFAULT_RSI_1M_BUY_MAX,
-            "rsi_1m_sell_min": DEFAULT_RSI_1M_SELL_MIN,
-            "rsi_1m_sell_max": DEFAULT_RSI_1M_SELL_MAX
+            "rsi_sell_max": DEFAULT_RSI_SELL_MAX
         }
 
 # --- Inline Keyboards ---
@@ -252,28 +239,24 @@ def quick_scan_single(symbol):
 
         settings = get_effective_settings(symbol)
         rsi_val = rsi.iloc[-1]
-        rsi_1m_val = rsi_1m.iloc[-1]
 
         is_bull = (prev_diff_before < 0) and (prev_diff > 0) and is_1m_bull
         is_bear = (prev_diff_before > 0) and (prev_diff < 0) and is_1m_bear
 
-        if is_bull and settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"] \
-                and settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]:
+        if is_bull and settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]:
             return "BUY", {"symbol": symbol, "macd_5m": m.iloc[-1], "signal_5m": s.iloc[-1],
                            "diff_5m": prev_diff, "macd_1m": m_1m.iloc[-1], "signal_1m": s_1m.iloc[-1],
-                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val, "rsi_1m": rsi_1m_val}
-        elif is_bear and settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"] \
-                and settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]:
+                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val}
+        elif is_bear and settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]:
             return "SELL", {"symbol": symbol, "macd_5m": m.iloc[-1], "signal_5m": s.iloc[-1],
                            "diff_5m": prev_diff, "macd_1m": m_1m.iloc[-1], "signal_1m": s_1m.iloc[-1],
-                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val, "rsi_1m": rsi_1m_val}
+                           "diff_1m": diff_1m_series.iloc[-1], "rsi_5m": rsi_val}
         return "NEUTRAL", None
     except Exception as e:
         return None, str(e)
 
-# --- NEW: Diagnose all conditions for a pair ---
+# --- Diagnose all conditions for a pair ---
 def diagnose_pair(symbol):
-    """Check all signal conditions and return a status message."""
     try:
         df = yf.Ticker(symbol).history(period="5d", interval="5m")
         if len(df) < 50:
@@ -291,7 +274,6 @@ def diagnose_pair(symbol):
 
         settings = get_effective_settings(symbol)
         rsi_val = rsi.iloc[-1]
-        rsi_1m_val = rsi_1m.iloc[-1]
 
         # Spread filter
         spread_blocked = symbol in spread_blocked_5m
@@ -318,11 +300,9 @@ def diagnose_pair(symbol):
         bull_1m = (cross_1m == 'bull')
         bear_1m = (cross_1m == 'bear')
 
-        # RSI ranges
+        # 5m RSI ranges
         rsi5_buy = settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]
         rsi5_sell = settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]
-        rsi1_buy = settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"]
-        rsi1_sell = settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"]
 
         # Cooldown
         cd = alert_cooldowns.get(symbol, 0)
@@ -336,12 +316,11 @@ def diagnose_pair(symbol):
         report += f"5m MACD cross: {'🟢 Bullish' if bull_5m else '🔴 Bearish' if bear_5m else '❌ None'}\n"
         report += f"Latest 1m cross: {'🟢 Bullish' if bull_1m else '🔴 Bearish' if bear_1m else '❌ None'}\n"
         report += f"5m RSI ({rsi_val:.1f}): {'✅' if (rsi5_buy or rsi5_sell) else '❌'}\n"
-        report += f"1m RSI ({rsi_1m_val:.1f}): {'✅' if (rsi1_buy or rsi1_sell) else '❌'}\n"
         report += f"Cooldown: {'✅' if cooldown_ok else '❌'}\n\n"
 
-        if bull_5m and bull_1m and rsi5_buy and rsi1_buy and spread_ok and compression_ok and cooldown_ok:
+        if bull_5m and bull_1m and rsi5_buy and spread_ok and compression_ok and cooldown_ok:
             report += "🟢 *BUY signal READY*"
-        elif bear_5m and bear_1m and rsi5_sell and rsi1_sell and spread_ok and compression_ok and cooldown_ok:
+        elif bear_5m and bear_1m and rsi5_sell and spread_ok and compression_ok and cooldown_ok:
             report += "🔴 *SELL signal READY*"
         else:
             report += "⏳ *No signal ready yet*"
@@ -360,7 +339,7 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # ========== HYBRID SPREAD FILTER ==========
+                    # Hybrid spread filter
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -388,7 +367,6 @@ def scanner_engine():
                             'low_spread_count': 0
                         }
                         continue
-                    # =========================================
 
                     df = yf.Ticker(symbol).history(period="5d", interval="5m")
                     if len(df) < 50: continue
@@ -396,7 +374,7 @@ def scanner_engine():
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    # ============ MACD COMPRESSION FILTER ============
+                    # MACD compression
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -422,7 +400,6 @@ def scanner_engine():
                                 continue
                         else:
                             compression_counter[symbol] = 0
-                    # ================================================
 
                     df_1m = yf.Ticker(symbol).history(period="1d", interval="1m")
                     if len(df_1m) < 30: continue
@@ -435,17 +412,14 @@ def scanner_engine():
 
                     settings = get_effective_settings(symbol)
                     rsi_val = rsi.iloc[-1]
-                    rsi_1m_val = rsi_1m.iloc[-1]
 
                     confirm_bull = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001) \
                                    and is_1m_bull \
-                                   and (settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]) \
-                                   and (settings["rsi_1m_buy_min"] <= rsi_1m_val <= settings["rsi_1m_buy_max"])
+                                   and (settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"])
 
                     confirm_bear = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001) \
                                    and is_1m_bear \
-                                   and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]) \
-                                   and (settings["rsi_1m_sell_min"] <= rsi_1m_val <= settings["rsi_1m_sell_max"])
+                                   and (settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"])
 
                     if confirm_bull or confirm_bear:
                         if time.time() - alert_cooldowns.get(symbol, 0) > 300:
@@ -474,7 +448,6 @@ def scanner_engine():
                                 f"⏱ Expiration: 5 minutes\n"
                                 f"⏰ Entry: {entry_time_str}\n"
                                 f"{arrow} Direction: {direction}\n"
-                                f"1m RSI: {rsi_1m_val:.2f}\n"
                                 f"📊 Martingale:\n"
                                 f"1⃣ {mart1}\n"
                                 f"2⃣ {mart2}\n"
@@ -488,8 +461,7 @@ def scanner_engine():
                                 f"5m Diff: {prev_diff:.5f}\n"
                                 f"1m MACD: {m_1m.iloc[-1]:.5f} | Signal: {s_1m.iloc[-1]:.5f}\n"
                                 f"1m Diff: {diff_1m_series.iloc[-1]:.5f}\n"
-                                f"5m RSI: {rsi_val:.2f}\n"
-                                f"1m RSI: {rsi_1m_val:.2f}\n\n"
+                                f"5m RSI: {rsi_val:.2f}\n\n"
                                 f"Status: SAFE (Active Liquidity)"
                             )
 
@@ -515,7 +487,6 @@ def scanner_engine():
                                     "signal_1m": s_1m.iloc[-1],
                                     "diff_1m": diff_1m_series.iloc[-1],
                                     "rsi_5m": rsi_val,
-                                    "rsi_1m": rsi_1m_val,
                                     "msg_id": sent_msg.message_id,
                                     "entry_delay": "",
                                     "loss_reason": "",
@@ -676,7 +647,7 @@ def process_loss_notes(message, msg_id):
             signal_details = (
                 f"Signal: {entry['direction']} {entry['symbol']}\n"
                 f"5m Diff: {entry['diff_5m']:.5f}, 1m Diff: {entry['diff_1m']:.5f}, "
-                f"5m RSI: {entry['rsi_5m']:.2f}, 1m RSI: {entry['rsi_1m']:.2f}"
+                f"5m RSI: {entry['rsi_5m']:.2f}"
             )
             break
 
@@ -740,8 +711,6 @@ def settings_target_selected(call):
     kb = InlineKeyboardMarkup(row_width=1)
     kb.add(InlineKeyboardButton("📈 RSI Buy (5m)", callback_data="param_rsi_buy"))
     kb.add(InlineKeyboardButton("📉 RSI Sell (5m)", callback_data="param_rsi_sell"))
-    kb.add(InlineKeyboardButton("📈 RSI Buy (1m)", callback_data="param_rsi_1m_buy"))
-    kb.add(InlineKeyboardButton("📉 RSI Sell (1m)", callback_data="param_rsi_1m_sell"))
     kb.add(InlineKeyboardButton("🔙 Back", callback_data="settings_menu"))
     bot.edit_message_text(f"⚙️ *Settings for {target_name}*\nSelect parameter to change:", call.message.chat.id,
                           call.message.message_id, reply_markup=kb, parse_mode="Markdown")
@@ -770,20 +739,6 @@ def settings_param_selected(call):
         else:
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_sell_min']}-{settings['rsi_sell_max']}"
-    elif param == "rsi_1m_buy":
-        prompt_text = f"Enter new 1m RSI Buy range as `min-max` (e.g., 30-40). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_1M_BUY_MIN}-{DEFAULT_RSI_1M_BUY_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_1m_buy_min']}-{settings['rsi_1m_buy_max']}"
-    elif param == "rsi_1m_sell":
-        prompt_text = f"Enter new 1m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
-        if target == "all":
-            prompt_text += f"Global: {DEFAULT_RSI_1M_SELL_MIN}-{DEFAULT_RSI_1M_SELL_MAX}"
-        else:
-            settings = get_effective_settings(target)
-            prompt_text += f"{target}: {settings['rsi_1m_sell_min']}-{settings['rsi_1m_sell_max']}"
 
     state["param"] = param
     bot.edit_message_text(prompt_text, call.message.chat.id, call.message.message_id)
@@ -792,6 +747,10 @@ def settings_param_selected(call):
     bot.answer_callback_query(call.id)
 
 def process_settings_value(message):
+    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
+    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
+    global pair_settings
+
     chat_id = message.chat.id
     if chat_id not in settings_state:
         return
@@ -801,7 +760,7 @@ def process_settings_value(message):
     value = message.text.strip()
 
     try:
-        if param in ("rsi_buy", "rsi_sell", "rsi_1m_buy", "rsi_1m_sell"):
+        if param in ("rsi_buy", "rsi_sell"):
             parts = value.split('-')
             if len(parts) != 2:
                 raise ValueError("Format must be min-max")
@@ -811,21 +770,11 @@ def process_settings_value(message):
                 raise ValueError("Invalid range")
             if target == "all":
                 if param == "rsi_buy":
-                    global DEFAULT_RSI_BUY_MIN, DEFAULT_RSI_BUY_MAX
                     DEFAULT_RSI_BUY_MIN = min_val
                     DEFAULT_RSI_BUY_MAX = max_val
                 elif param == "rsi_sell":
-                    global DEFAULT_RSI_SELL_MIN, DEFAULT_RSI_SELL_MAX
                     DEFAULT_RSI_SELL_MIN = min_val
                     DEFAULT_RSI_SELL_MAX = max_val
-                elif param == "rsi_1m_buy":
-                    global DEFAULT_RSI_1M_BUY_MIN, DEFAULT_RSI_1M_BUY_MAX
-                    DEFAULT_RSI_1M_BUY_MIN = min_val
-                    DEFAULT_RSI_1M_BUY_MAX = max_val
-                elif param == "rsi_1m_sell":
-                    global DEFAULT_RSI_1M_SELL_MIN, DEFAULT_RSI_1M_SELL_MAX
-                    DEFAULT_RSI_1M_SELL_MIN = min_val
-                    DEFAULT_RSI_1M_SELL_MAX = max_val
                 bot.reply_to(message, f"✅ Global {param} set to {min_val}-{max_val}")
             else:
                 if target not in pair_settings:
@@ -836,12 +785,6 @@ def process_settings_value(message):
                 elif param == "rsi_sell":
                     pair_settings[target]["rsi_sell_min"] = min_val
                     pair_settings[target]["rsi_sell_max"] = max_val
-                elif param == "rsi_1m_buy":
-                    pair_settings[target]["rsi_1m_buy_min"] = min_val
-                    pair_settings[target]["rsi_1m_buy_max"] = max_val
-                elif param == "rsi_1m_sell":
-                    pair_settings[target]["rsi_1m_sell_min"] = min_val
-                    pair_settings[target]["rsi_1m_sell_max"] = max_val
                 bot.reply_to(message, f"✅ {target} {param} set to {min_val}-{max_val}")
         else:
             bot.reply_to(message, "Unknown parameter.")
@@ -965,7 +908,7 @@ def handle_callback(call):
                 bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
                 bot.answer_callback_query(call.id, "Hiding details")
 
-        # NEW: Conditions menu flow
+        # Conditions menu flow
         elif data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
@@ -981,7 +924,7 @@ def handle_callback(call):
             with data_lock:
                 pairs = list(STRATEGY_PAIRS)
             kb = InlineKeyboardMarkup(row_width=2)
-            for pair in pairs[:10]:   # first 10 pairs for simplicity
+            for pair in pairs[:10]:
                 kb.add(InlineKeyboardButton(pair, callback_data=f"cond_{pair}"))
             kb.add(InlineKeyboardButton("🔙 Back", callback_data="signal_conditions"))
             bot.edit_message_text("Select a pair:", call.message.chat.id, call.message.message_id,
@@ -1011,7 +954,7 @@ def handle_callback(call):
                 if direction and direction != "NEUTRAL":
                     icon = "🟢" if direction == "BUY" else "🔴"
                     r = result if isinstance(result, dict) else None
-                    if r: results.append(f"{icon} {pair}: {direction} (RSI5m: {r['rsi_5m']:.1f}, RSI1m: {r['rsi_1m']:.1f})")
+                    if r: results.append(f"{icon} {pair}: {direction} (RSI5m: {r['rsi_5m']:.1f})")
             msg = "📊 *Quick Scan Results:*\n" + ("\n".join(results) if results else "No signals found.")
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="quick_scan"))
@@ -1032,7 +975,6 @@ def handle_callback(call):
                        f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                        f"1m Diff: {result['diff_1m']:.5f}\n"
                        f"5m RSI: {result['rsi_5m']:.2f}\n"
-                       f"1m RSI: {result['rsi_1m']:.2f}\n"
                        f"Signal: {direction}")
             else:
                 msg = f"❌ Error: {result}"
@@ -1143,7 +1085,6 @@ def handle_callback(call):
                        f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
                        f"1m Diff: {result['diff_1m']:.5f}\n"
                        f"5m RSI: {result['rsi_5m']:.2f}\n"
-                       f"1m RSI: {result['rsi_1m']:.2f}\n"
                        f"Signal: {direction}")
             else: msg = f"❌ Error: {result}"
             kb = InlineKeyboardMarkup().add(
@@ -1217,7 +1158,7 @@ def handle_callback(call):
                 "• 💬 Chat: ask me anything\n"
                 "• 🐛 Debug: analyze a signal\n"
                 "• 🧪 Test AI: check connection\n"
-                "• ⚙️ Settings: adjust RSI (5m & 1m)\n"
+                "• ⚙️ Settings: adjust RSI (5m)\n"
                 "• 📋 Conditions: live checklist\n"
                 "• 📈 Stats / ⏱️ Entry\n\n"
                 "RSI: configurable per pair"
@@ -1238,7 +1179,6 @@ def process_cond_manual(message):
     if str(message.chat.id) != CHAT_ID:
         return
     pair = message.text.strip().upper()
-    # Validate if pair exists or try with =X
     if "=X" not in pair:
         pair += "=X"
     report = diagnose_pair(pair)
