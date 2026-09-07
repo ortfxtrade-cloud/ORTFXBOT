@@ -10,7 +10,7 @@ import pandas as pd
 import telebot
 import yfinance as yf
 from flask import Flask
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButto
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # Load credentials from environment variables, with optional fallbacks
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
