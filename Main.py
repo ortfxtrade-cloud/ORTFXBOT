@@ -10,11 +10,12 @@ import pandas as pd
 import telebot
 import yfinance as yf
 from flask import Flask
-from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
+from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButto
 
-# --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAE_x9_ixCY5X2cot2KLFEiHW91ZdAZrkDI"
-CHAT_ID = "8701685996"
+# Load credentials from environment variables, with optional fallbacks
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
+
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
 app = Flask(__name__)
