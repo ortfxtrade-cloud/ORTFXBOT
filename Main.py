@@ -12,9 +12,18 @@ import yfinance as yf
 from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
-# Load credentials from environment variables, with optional fallbacks
+# --- Load credentials with validation ---
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 CHAT_ID = os.getenv("CHAT_ID")
+
+if not TELEGRAM_TOKEN:
+    raise RuntimeError("❌ TELEGRAM_TOKEN is not set in environment variables")
+
+if not CHAT_ID:
+    raise RuntimeError("❌ CHAT_ID is not set in environment variables")
+
+print(f"✅ TELEGRAM_TOKEN loaded: {TELEGRAM_TOKEN[:10]}...")
+print(f"✅ CHAT_ID loaded: {CHAT_ID}")
 
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
@@ -73,6 +82,13 @@ logging.basicConfig(level=logging.INFO)
 @app.route('/')
 def health_check():
     return "Bot is running!"
+
+# --- Debug message handler (catches ALL messages) ---
+@bot.message_handler(func=lambda m: True)
+def debug_all_messages(m):
+    print(f"🔍 RECEIVED MESSAGE from {m.chat.id}: {m.text}")
+    print(f"🔍 Expected CHAT_ID: {CHAT_ID}")
+    print(f"🔍 Match: {str(m.chat.id) == str(CHAT_ID)}")
 
 # --- Helper: get effective settings for a pair ---
 def get_effective_settings(symbol):
@@ -276,13 +292,11 @@ def diagnose_pair(symbol):
         settings = get_effective_settings(symbol)
         rsi_val = rsi.iloc[-1]
 
-        # Spread filter
         spread_blocked = symbol in spread_blocked_5m
         if not spread_blocked:
             spread_blocked = is_spread_present_5m(symbol)
         spread_ok = not spread_blocked
 
-        # MACD compression
         hist_abs = h.abs()
         avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
         current_abs = abs(h.iloc[-1])
@@ -293,23 +307,18 @@ def diagnose_pair(symbol):
         else:
             compression_ok = not (current_abs < low_thresh and compression_counter.get(symbol, 0) >= 10)
 
-        # 5m cross
         bull_5m = (prev_diff_before < 0) and (prev_diff > 0) and (abs(prev_diff) >= 0.00001)
         bear_5m = (prev_diff_before > 0) and (prev_diff < 0) and (abs(prev_diff) >= 0.00001)
 
-        # 1m cross
         bull_1m = (cross_1m == 'bull')
         bear_1m = (cross_1m == 'bear')
 
-        # 5m RSI ranges
         rsi5_buy = settings["rsi_buy_min"] <= rsi_val <= settings["rsi_buy_max"]
         rsi5_sell = settings["rsi_sell_min"] <= rsi_val <= settings["rsi_sell_max"]
 
-        # Cooldown
         cd = alert_cooldowns.get(symbol, 0)
         cooldown_ok = (time.time() - cd) > 300
 
-        # Build report
         pair_display = symbol.replace("=X", "")
         report = f"📋 *Conditions for {pair_display}*\n\n"
         report += f"Spread filter: {'✅' if spread_ok else '❌'}\n"
@@ -340,7 +349,6 @@ def scanner_engine():
             random.shuffle(current_pairs)
             for symbol in current_pairs:
                 try:
-                    # Hybrid spread filter
                     if symbol in spread_blocked_5m:
                         blocked_info = spread_blocked_5m[symbol]
                         if OANDA_API_KEY and OANDA_ACCOUNT_ID:
@@ -375,7 +383,6 @@ def scanner_engine():
                     prev_diff = m.iloc[-1] - s.iloc[-1]
                     prev_diff_before = m.iloc[-2] - s.iloc[-2]
 
-                    # MACD compression
                     hist_abs = h.abs()
                     avg_hist_abs = hist_abs.tail(100).mean() if len(hist_abs) >= 100 else hist_abs.mean()
                     current_abs = abs(h.iloc[-1])
@@ -734,7 +741,7 @@ def settings_param_selected(call):
             settings = get_effective_settings(target)
             prompt_text += f"{target}: {settings['rsi_buy_min']}-{settings['rsi_buy_max']}"
     elif param == "rsi_sell":
-        prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 50-70). Current:\n"
+        prompt_text = f"Enter new 5m RSI Sell range as `min-max` (e.g., 60-70). Current:\n"
         if target == "all":
             prompt_text += f"Global: {DEFAULT_RSI_SELL_MIN}-{DEFAULT_RSI_SELL_MAX}"
         else:
@@ -909,7 +916,6 @@ def handle_callback(call):
                 bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
                 bot.answer_callback_query(call.id, "Hiding details")
 
-        # Conditions menu flow
         elif data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
@@ -1233,9 +1239,16 @@ def process_feedback_reply(message, msg_id):
 # --- Message Handlers ---
 @bot.message_handler(commands=['start'])
 def start(m):
+    print(f"🔍 Received /start from {m.chat.id}")
+    print(f"🔍 Expected CHAT_ID: {CHAT_ID}")
+    print(f"🔍 Match: {str(m.chat.id) == str(CHAT_ID)}")
+    
     if str(m.chat.id) == CHAT_ID:
         bot.send_message(m.chat.id, "🚀 *Forex Scanner Online*\nUse the buttons below.",
                          reply_markup=get_main_menu(), parse_mode="Markdown")
+        print("✅ Main menu sent")
+    else:
+        print("❌ CHAT_ID mismatch - user not authorized")
 
 @bot.message_handler(commands=['menu'])
 def menu_cmd(m):
@@ -1273,18 +1286,17 @@ def handle_chat_message(m):
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     
-    # Start scanner and martingale in daemon threads
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=martingale_scheduler, daemon=True).start()
     
-    # Run Flask in a daemon thread
-    flask_thread = threading.Thread(
+    threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True
-    )
-    flask_thread.start()
+    ).start()
     
-    # Run bot polling in MAIN thread
     print("Starting bot polling...")
-    bot.remove_webhook()  # Remove any old webhook
+    print(f"Bot token: {TELEGRAM_TOKEN[:10]}...")
+    print(f"CHAT_ID: {CHAT_ID}")
+    
+    bot.remove_webhook()
     bot.infinity_polling(timeout=30, long_polling_timeout=30)
