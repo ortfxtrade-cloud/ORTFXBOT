@@ -13,7 +13,7 @@ from flask import Flask
 from telebot.types import ReplyKeyboardMarkup, KeyboardButton, InlineKeyboardMarkup, InlineKeyboardButton
 
 # --- Configuration ---
-TELEGRAM_TOKEN = "8686769653:AAFzWlFiHb1umHbVYMjjQA8QZkmZDPp6x6o"
+TELEGRAM_TOKEN = "8686769653:AAGCt0NwjelWnkOAuLKydCUAqz_N5Sf7ss4"
 CHAT_ID = "8701685996"
 bot = telebot.TeleBot(TELEGRAM_TOKEN, parse_mode=None)
 
@@ -53,8 +53,8 @@ chat_mode = {}
 
 # --- Default RSI settings (5m only) ---
 DEFAULT_RSI_BUY_MIN = 30
-DEFAULT_RSI_BUY_MAX = 40
-DEFAULT_RSI_SELL_MIN = 50
+DEFAULT_RSI_BUY_MAX = 45
+DEFAULT_RSI_SELL_MIN = 55
 DEFAULT_RSI_SELL_MAX = 70
 
 pair_settings = {}
