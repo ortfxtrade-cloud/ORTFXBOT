@@ -804,7 +804,7 @@ def process_settings_value(message):
     settings_state.pop(chat_id, None)
     bot.send_message(chat_id, "Settings updated.", reply_markup=get_main_menu())
 
-# --- Callback Handlers (with Conditions) ---
+# --- Callback Handlers ---
 @bot.callback_query_handler(func=lambda call: True)
 def handle_callback(call):
     if str(call.message.chat.id) != CHAT_ID:
@@ -858,64 +858,6 @@ def handle_callback(call):
             start_loss_interview(call.message.chat.id, msg_id)
             bot.answer_callback_query(call.id, "Answer the question below to record loss details.")
 
-        elif data.startswith("fbdetails_"):
-            pending_feedback[call.message.chat.id] = msg_id
-            ask_msg = bot.send_message(
-                call.message.chat.id,
-                "📝 Reply with the result and optional details.\n"
-                "Format: `WIN 2m reason: good entry` or `LOSS reason: spread`\n"
-                "Reply with SKIP to cancel.",
-                parse_mode="Markdown"
-            )
-            bot.register_next_step_handler(ask_msg, process_feedback_reply, msg_id)
-            bot.answer_callback_query(call.id, "Reply with WIN/LOSS and details...")
-
-        elif data.startswith("showdetails_") or data.startswith("hidedetails_"):
-            full_msg = full_signal_messages.get(msg_id)
-            if not full_msg:
-                bot.answer_callback_query(call.id, "Details not available.")
-                return
-            if data.startswith("showdetails_"):
-                new_kb = InlineKeyboardMarkup(row_width=2)
-                for row in call.message.reply_markup.keyboard:
-                    new_row = []
-                    for btn in row:
-                        if btn.callback_data.startswith("showdetails_"):
-                            new_row.append(InlineKeyboardButton("🔍 Hide Details", callback_data="hidedetails_"))
-                        elif btn.callback_data.startswith("hidedetails_"):
-                            new_row.append(InlineKeyboardButton("🔍 More Details", callback_data="showdetails_"))
-                        else:
-                            new_row.append(btn)
-                    if new_row:
-                        new_kb.add(*new_row)
-                bot.edit_message_text(full_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
-                bot.answer_callback_query(call.id, "Showing details")
-            else:
-                short_msg = None
-                for entry in signal_log:
-                    if entry.get("msg_id") == msg_id:
-                        direction = entry.get("direction", "BUY")
-                        symbol = entry.get("symbol", "")
-                        icon = "🟢" if direction == "BUY" else "🔴"
-                        short_msg = f"{icon} *{direction}* {symbol}\n\n✅ Confirmed"
-                        break
-                if not short_msg:
-                    short_msg = "Signal (tap to refresh)"
-                new_kb = InlineKeyboardMarkup(row_width=2)
-                for row in call.message.reply_markup.keyboard:
-                    new_row = []
-                    for btn in row:
-                        if btn.callback_data.startswith("hidedetails_"):
-                            new_row.append(InlineKeyboardButton("🔍 More Details", callback_data="showdetails_"))
-                        elif btn.callback_data.startswith("showdetails_"):
-                            new_row.append(InlineKeyboardButton("🔍 Hide Details", callback_data="hidedetails_"))
-                        else:
-                            new_row.append(btn)
-                    if new_row:
-                        new_kb.add(*new_row)
-                bot.edit_message_text(short_msg, call.message.chat.id, msg_id, reply_markup=new_kb, parse_mode="Markdown")
-                bot.answer_callback_query(call.id, "Hiding details")
-
         elif data == "signal_conditions":
             kb = InlineKeyboardMarkup(row_width=1)
             kb.add(
@@ -947,66 +889,16 @@ def handle_callback(call):
 
         elif data.startswith("cond_"):
             pair = data[5:]
-            logging.info(f"Condition check for {pair}")
             report = diagnose_pair(pair)
             bot.send_message(call.message.chat.id, report, parse_mode="Markdown")
             bot.answer_callback_query(call.id, "Conditions checked")
 
-        elif data == "quick_scan":
-            with data_lock: pairs = list(STRATEGY_PAIRS[:5])
-            bot.send_message(call.message.chat.id, "🔍 *Quick scanning...*", parse_mode="Markdown")
-            results = []
-            for pair in pairs:
-                direction, result = quick_scan_single(pair)
-                if direction and direction != "NEUTRAL":
-                    icon = "🟢" if direction == "BUY" else "🔴"
-                    r = result if isinstance(result, dict) else None
-                    if r: results.append(f"{icon} {pair}: {direction} (RSI5m: {r['rsi_5m']:.1f})")
-            msg = "📊 *Quick Scan Results:*\n" + ("\n".join(results) if results else "No signals found.")
-            kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="quick_scan"))
-            kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-            bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Scan complete")
-
-        elif data.startswith("quick_") and data != "quick_scan":
-            pair = data.replace("quick_", "")
-            logging.info(f"Rescan requested for {pair}")
-            bot.send_message(call.message.chat.id, f"🔍 *Scanning {pair}...*", parse_mode="Markdown")
-            direction, result = quick_scan_single(pair)
-            if isinstance(result, dict):
-                icon = {"BUY": "🟢", "SELL": "🔴"}.get(direction, "⚪")
-                msg = (f"{icon} *{pair}*\n\n"
-                       f"5m MACD: {result['macd_5m']:.5f} | Signal: {result['signal_5m']:.5f}\n"
-                       f"5m Diff: {result['diff_5m']:.5f}\n"
-                       f"1m MACD: {result['macd_1m']:.5f} | Signal: {result['signal_1m']:.5f}\n"
-                       f"1m Diff: {result['diff_1m']:.5f}\n"
-                       f"5m RSI: {result['rsi_5m']:.2f}\n"
-                       f"Signal: {direction}")
-            else:
-                msg = f"❌ Error: {result}"
-            kb = InlineKeyboardMarkup()
-            kb.add(InlineKeyboardButton("🔄 Rescan", callback_data=f"quick_{pair}"))
-            kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
-            bot.send_message(call.message.chat.id, msg, reply_markup=kb, parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Rescan complete")
-
-        elif data == "chat_start":
-            chat_mode[call.message.chat.id] = "chat"
-            bot.send_message(call.message.chat.id, "💬 *Chat mode activated*\nType your message (or /cancel to exit).", parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Chat mode on")
-        elif data == "debug_start":
-            chat_mode[call.message.chat.id] = "debug"
-            bot.send_message(call.message.chat.id, "🐛 *Debug mode activated*\nPaste signal details for analysis (or /cancel to exit).", parse_mode="Markdown")
-            bot.answer_callback_query(call.id, "Debug mode on")
-
-        elif data == "test_ai":
-            answer = ask_ai_core("Reply with 'AI Core is connected and ready.' Keep it very short.")
-            bot.answer_callback_query(call.id, answer[:200], show_alert=True)
-
         elif data == "main_menu":
-            bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, call.message.message_id,
+            bot.edit_message_text("📋 *Main Menu*", call.message.chat.id, msg_id,
                                   reply_markup=get_main_menu(), parse_mode="Markdown")
+            bot.answer_callback_query(call.id)
+            return
+
         elif data == "status":
             blocked_count = len(spread_blocked_5m) + sum(compression_blocked.values())
             status_text = f"🟢 Scanner: {'RUNNING' if STATE['running'] else 'PAUSED'}\n📊 Pairs: {len(STRATEGY_PAIRS)}\n🚫 Blocked: {blocked_count}"
@@ -1114,15 +1006,6 @@ def handle_callback(call):
                     avg = sum(stats["wins"])/len(stats["wins"])
                     msg += f"• {sym}: {avg:.1f}s\n"
             if not pair_entry_stats: msg += "No data yet\n"
-            reason_counts = {}
-            for entry in signal_log:
-                if entry.get("result") == "LOSS" and entry.get("loss_reason"):
-                    r = entry["loss_reason"]
-                    reason_counts[r] = reason_counts.get(r, 0) + 1
-            if reason_counts:
-                msg += "\n*Top Loss Reasons:*\n"
-                for r, cnt in sorted(reason_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
-                    msg += f"• {r}: {cnt}\n"
             kb = InlineKeyboardMarkup()
             kb.add(InlineKeyboardButton("🔄 Refresh", callback_data="stats_page"))
             kb.add(InlineKeyboardButton("🔙 Main Menu", callback_data="main_menu"))
@@ -1194,7 +1077,6 @@ def process_cond_manual(message):
 # --- Old feedback reply handler ---
 def process_feedback_reply(message, msg_id):
     if str(message.chat.id) != CHAT_ID: return
-    pending_feedback.pop(message.chat.id, None)
     text = message.text.strip()
     if text.upper() == "SKIP":
         bot.reply_to(message, "Feedback details skipped.")
@@ -1248,7 +1130,7 @@ def start(m):
                          reply_markup=get_main_menu(), parse_mode="Markdown")
         print("✅ Main menu sent")
     else:
-        print("❌ CHAT_ID mismatch - user not authorized")
+        print("❌ CHAT_ID mismatch")
 
 @bot.message_handler(commands=['menu'])
 def menu_cmd(m):
@@ -1282,21 +1164,44 @@ def handle_chat_message(m):
     answer = ask_ai_core(m.text, system_prompt)
     bot.edit_message_text(answer, m.chat.id, thinking.message_id)
 
-# --- Main Entry (clean) ---
+# --- Main Entry with Manual Polling (Fixes 409 Error) ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
     
+    # Start background threads
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=martingale_scheduler, daemon=True).start()
     
+    # Flask in daemon thread
     threading.Thread(
         target=lambda: app.run(host="0.0.0.0", port=port),
         daemon=True
     ).start()
     
-    print("Starting bot polling...")
-    print(f"Bot token: {TELEGRAM_TOKEN[:10]}...")
-    print(f"CHAT_ID: {CHAT_ID}")
+    print("Waiting 10 seconds before polling...")
+    time.sleep(10)
     
-    bot.remove_webhook()
-    bot.infinity_polling(timeout=30, long_polling_timeout=30)
+    print("Deleting webhook...")
+    try:
+        bot.remove_webhook()
+    except:
+        pass
+    time.sleep(5)
+    
+    print("Starting manual polling...")
+    
+    # Manual polling loop (prevents multiple instances)
+    last_update_id = 0
+    while True:
+        try:
+            updates = bot.get_updates(
+                offset=last_update_id + 1,
+                timeout=30,
+                allowed_updates=["message", "callback_query"]
+            )
+            for update in updates:
+                last_update_id = update.update_id
+                bot.process_new_updates([update])
+        except Exception as e:
+            print(f"Polling error: {e}")
+            time.sleep(10)
