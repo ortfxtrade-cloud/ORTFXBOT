@@ -1272,8 +1272,19 @@ def handle_chat_message(m):
 # --- Main Entry (clean) ---
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 8080))
+    
+    # Start scanner and martingale in daemon threads
     threading.Thread(target=scanner_engine, daemon=True).start()
     threading.Thread(target=martingale_scheduler, daemon=True).start()
-    threading.Thread(target=bot.infinity_polling, daemon=True).start()
-    print(f"Bot and Web Server starting on port {port}...")
-    app.run(host="0.0.0.0", port=port)
+    
+    # Run Flask in a daemon thread
+    flask_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port),
+        daemon=True
+    )
+    flask_thread.start()
+    
+    # Run bot polling in MAIN thread
+    print("Starting bot polling...")
+    bot.remove_webhook()  # Remove any old webhook
+    bot.infinity_polling(timeout=30, long_polling_timeout=30)
